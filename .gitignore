@@ -1,0 +1,6 @@
+# Standard
+__pycache__/
+*.pyc
+.env
+.usage.json
+.pytest_cache/
