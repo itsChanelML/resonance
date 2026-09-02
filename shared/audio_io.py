@@ -2,6 +2,7 @@
 rate limit, since this runs on-device via faster-whisper."""
 
 import logging
+import os
 import tempfile
 import wave
 
@@ -9,7 +10,7 @@ import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
 
-logger = logging.getLogger("mentor.audio")
+logger = logging.getLogger("resonance.audio")
 
 SAMPLE_RATE = 16000
 MIN_RECORDING_SECONDS = 0.3
@@ -69,8 +70,14 @@ class VoiceCapture:
             self._write_wav(f.name, audio)
             path = f.name
 
-        segments, _ = self.model.transcribe(path, language="en")
-        return " ".join(seg.text for seg in segments).strip()
+        try:
+            segments, _ = self.model.transcribe(path, language="en")
+            return " ".join(seg.text for seg in segments).strip()
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass  # best-effort cleanup, not worth failing the turn over
 
     @staticmethod
     def _write_wav(path: str, audio: np.ndarray) -> None:

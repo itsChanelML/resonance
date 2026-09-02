@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import requests
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-logger = logging.getLogger("mentor.llm")
+logger = logging.getLogger("resonance.llm")
 
 NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 

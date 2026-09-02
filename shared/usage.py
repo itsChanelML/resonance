@@ -13,7 +13,7 @@ import os
 import time
 from pathlib import Path
 
-logger = logging.getLogger("mentor.usage")
+logger = logging.getLogger("resonance.usage")
 
 DEFAULT_PATH = Path(__file__).resolve().parent.parent / ".usage.json"
 
