@@ -136,6 +136,7 @@ resonance/
 │   ├── voice_out.py         # ElevenLabs Flash TTS client, streaming playback, barge-in
 │   └── usage.py               # local free-tier usage tracking, persisted to .usage.json
 └── tests/
+    ├── test_resonance.py     # handle(), hotkey/barge-in wiring, notify, run loop
     ├── test_llm_client.py
     ├── test_voice_out.py
     ├── test_audio_io.py
@@ -276,8 +277,10 @@ pip install -r requirements-dev.txt
 pytest
 ```
 Everything's mocked, no API keys or microphone required. Covers the
-retry/backoff paths on both clients, the recording-length cap, and the
-usage tracker's threshold/reset logic.
+retry/backoff paths on both clients, the recording-length cap, the
+usage tracker's threshold/reset logic, and `resonance.py`'s own
+orchestration: `handle()`, hotkey/barge-in wiring, OS notifications,
+and the typed-input run loop.
 
 ---
 
@@ -315,6 +318,8 @@ Update this as milestones land. A stale roadmap is worse than none.
       reply, local usage tracking against each vendor's free tier
 - [x] Unit tests for both clients, the recording cap, and usage tracking
       (mocked, no live API calls)
+- [x] Unit tests for `resonance.py`'s own orchestration: `handle()`,
+      hotkey/barge-in wiring, notifications, and the run loop
 - [ ] Feed real terminal output and git diffs into the prompt directly,
       not just what's said or typed
 - [ ] Stream the NIM reply itself and start speaking the first sentence
