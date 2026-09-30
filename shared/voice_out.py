@@ -1,6 +1,7 @@
 """ElevenLabs Flash text-to-speech playback, with retry/backoff."""
 
 import logging
+import os
 import subprocess
 import threading
 
@@ -15,6 +16,9 @@ class ElevenLabsVoice:
         self.api_key = api_key
         self.voice_id = voice_id
         self.usage = usage  # optional shared.usage.UsageTracker
+        # ElevenLabs accepts speed 0.7-1.2 (1.0 = normal); stability 0-1.
+        self.speed = min(1.2, max(0.7, float(os.environ.get("ELEVENLABS_SPEED", 1.0))))
+        self.stability = min(1.0, max(0.0, float(os.environ.get("ELEVENLABS_STABILITY", 0.5))))
         self._lock = threading.Lock()
         self._process = None
         self._interrupted = False
@@ -33,7 +37,11 @@ class ElevenLabsVoice:
             json={
                 "text": text,
                 "model_id": "eleven_flash_v2_5",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.75},
+                "voice_settings": {
+                    "stability": self.stability,
+                    "similarity_boost": 0.75,
+                    "speed": self.speed,
+                },
             },
             stream=True,
             timeout=30,

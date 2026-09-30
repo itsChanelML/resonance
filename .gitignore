@@ -4,3 +4,4 @@ __pycache__/
 .env
 .usage.json
 .pytest_cache/
+voice_previews/
