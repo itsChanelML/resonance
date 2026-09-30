@@ -5,6 +5,7 @@ import logging
 import os
 import tempfile
 import wave
+import warnings
 
 import numpy as np
 import sounddevice as sd
@@ -71,8 +72,14 @@ class VoiceCapture:
             path = f.name
 
         try:
-            segments, _ = self.model.transcribe(path, language="en")
-            return " ".join(seg.text for seg in segments).strip()
+            # Apple Silicon's Accelerate BLAS emits spurious divide-by-zero /
+            # overflow RuntimeWarnings on the mel-spectrogram matmul for
+            # short or silence-padded clips; harmless, but noisy on a shared
+            # screen, so it's silenced here rather than at the module level.
+            with warnings.catch_warnings():
+                warnings.filterwarnings("ignore", category=RuntimeWarning)
+                segments, _ = self.model.transcribe(path, language="en")
+                return " ".join(seg.text for seg in segments).strip()
         finally:
             try:
                 os.remove(path)

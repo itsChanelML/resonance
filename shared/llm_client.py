@@ -15,7 +15,7 @@ NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 @dataclass
 class NimConfig:
     api_key: str
-    model: str = "nvidia/nemotron-3-nano-30b-a3b"  # NVIDIA's own model, tuned for exactly this: low-latency agentic and voice-assistant workloads
+    model: str = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"  # nemotron-3-nano-30b-a3b hit EOL 2026-09-01; this is its live successor on NIM
     max_tokens: int = 300
     temperature: float = 0.4
 

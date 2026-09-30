@@ -44,7 +44,8 @@ MAX_RECORDING_SECONDS = 30  # a stuck/held key shouldn't record indefinitely
 NIM_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 # NVIDIA's own Nemotron 3 Nano: a mixture-of-experts model built for exactly
 # this kind of low-latency, agentic, voice-assistant workload.
-NIM_MODEL = "nvidia/nemotron-3-nano-30b-a3b"
+# nemotron-3-nano-30b-a3b hit EOL 2026-09-01; this is its live successor on NIM.
+NIM_MODEL = "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
 
 SYSTEM_PROMPT = (
     "You are Terminal Whisperer, an ambient voice pair programmer. "
