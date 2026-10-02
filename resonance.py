@@ -36,6 +36,7 @@ instead of waiting for the current reply to finish.
 VOICE_OUTPUT=false drops to a fully silent, text-only mode.
 """
 
+import argparse
 import logging
 import os
 import shutil
@@ -49,7 +50,13 @@ from dotenv import load_dotenv
 load_dotenv()  # reads .env in the current directory, if present
 
 from shared.audio_io import VoiceCapture
+from shared.context_builder import (
+    build_context_block, check_citations, project_prompt, split_reply,
+)
 from shared.llm_client import NimClient, NimConfig
+from shared.project_context import ProjectSession
+from shared.trace import TurnTrace
+from shared.turn_controller import TurnController
 from shared.usage import UsageTracker
 from shared.voice_out import ElevenLabsVoice
 
@@ -85,6 +92,13 @@ SYSTEM_PROMPT = (
     "language, every word earning its place in the sentence."
 )
 
+# With project context attached the spoken part is a summary; the detail
+# stays in the terminal (see shared/context_builder.PROJECT_PROMPT).
+SYSTEM_PROMPT_PROJECT = (
+    "You are Resonance, a voice-first engineering companion. Be precise and "
+    "separate observed evidence from hypotheses."
+)
+
 MAX_HISTORY_TURNS = 6  # keep recent context only, so NIM calls stay cheap
 
 
@@ -105,7 +119,9 @@ def _notify(title: str, message: str) -> None:
 
 
 class Resonance:
-    def __init__(self):
+    def __init__(self, project: str | None = None, context: list[str] | None = None):
+        self.project: ProjectSession | None = None
+        self.last_trace: list[dict] = []
         self.capture = VoiceCapture()
         self.usage = UsageTracker()
         self.nim = NimClient(NimConfig(api_key=os.environ["NVIDIA_API_KEY"]), usage=self.usage)
@@ -117,41 +133,156 @@ class Resonance:
         self.history: list[dict] = []
         self._history_lock = threading.Lock()
         self._speaking = threading.Event()
+        self.turns = TurnController()
+        self.last_turn: TurnTrace | None = None
+        if project:
+            self.set_project(project)
+        for path in context or []:
+            self.attach(path)
+
+    def set_project(self, root: str) -> None:
+        self.project = ProjectSession(root)
+        with self._history_lock:
+            self.history.clear()  # don't carry another project's context over
+        print(f"  Project: {self.project.root}")
+
+    def attach(self, path: str) -> None:
+        if self.project is None:
+            print("  No project selected. Start with --project <dir> or /project <dir>.")
+            return
+        result = self.project.attach(path)
+        if result.status != "OK":
+            print(f"  [{result.status}] {result.message}")
+            return
+        src = result.sources[0]
+        notes = []
+        if src.truncated:
+            notes.append("truncated")
+        if src.redactions:
+            notes.append(f"{src.redactions} secret-like value(s) redacted")
+        suffix = f" ({', '.join(notes)})" if notes else ""
+        print(f"  Attached {src.ref}, {len(src.content)} chars{suffix}")
+
+    def _command(self, text: str) -> bool:
+        """Handles /project, /attach, /context. Returns True if consumed."""
+        if not text.startswith("/"):
+            return False
+        cmd, _, arg = text.partition(" ")
+        arg = arg.strip()
+        if cmd == "/project" and arg:
+            try:
+                self.set_project(arg)
+            except NotADirectoryError as exc:
+                print(f"  [NOT_FOUND] {exc}")
+        elif cmd == "/attach" and arg:
+            self.attach(arg)
+        elif cmd == "/context":
+            if not self.project or not self.project.attachments:
+                print("  No context attached.")
+            else:
+                _, trace = build_context_block(list(self.project.attachments.values()))
+                for t in trace:
+                    flag = " (omitted for budget)" if t["omitted_for_budget"] else ""
+                    print(f"  {t['path']}  lines {t['lines']}  {t['chars_sent']} chars{flag}")
+        elif cmd == "/preview":
+            if not self.project or not self.project.attachments:
+                print("  No context attached.")
+            else:
+                block, _ = build_context_block(list(self.project.attachments.values()))
+                print(block)
+                print("  ^ exactly this text, plus your question, is sent to NVIDIA NIM.")
+        elif cmd == "/clear":
+            if self.project:
+                self.project.clear()
+            print("  Context cleared.")
+        else:
+            print("  Commands: /project <dir>, /attach <file>, /context, /preview, /clear")
+        return True
 
     def handle(self, text: str, source: str) -> None:
         if not text.strip():
             return
+        if source == "typed" and self._command(text.strip()):
+            return
 
         logger.info("[%s input] %s", source, text)
+        self._interrupt_speech()  # a new turn always silences the previous answer
+        turn_id = self.turns.begin()
+        trace = self.last_turn = TurnTrace(self.turns.number(turn_id), source)
         print("  Thinking...")
 
         with self._history_lock:
-            messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-            messages += self.history[-MAX_HISTORY_TURNS:]
+            history = self.history[-MAX_HISTORY_TURNS:]
+        system = SYSTEM_PROMPT
+        sources = []
+        if self.project and self.project.attachments:
+            for rel in self.project.refresh_stale():
+                print(f"  (re-read {rel}: file changed)")
+            sources = list(self.project.attachments.values())
+            block, self.last_trace = build_context_block(sources)
+            trace.context = self.last_trace
+            system = SYSTEM_PROMPT_PROJECT + project_prompt(sources) + "\n\n" + block
+        messages = [{"role": "system", "content": system}] + history
         messages.append({"role": "user", "content": text})
 
-        reply = self.nim.chat(messages)
+        try:
+            if sources:
+                reply = self.nim.chat(messages, max_tokens=900, thinking=False)
+            else:
+                reply = self.nim.chat(messages)
+        except Exception as exc:
+            trace.status = "ERROR"
+            if self.turns.is_current(turn_id):
+                print(f"  [ERROR] model request failed: {exc}. Try again, or type your question.")
+            return
+        trace.mark("model_reply")
 
+        if not self.turns.is_current(turn_id):
+            trace.status = "STALE"  # user moved on; drop this answer entirely
+            logger.info("dropped stale reply for turn %s", turn_id)
+            return
+
+        spoken, detail = split_reply(reply) if sources else (reply, reply)
         with self._history_lock:
             self.history.append({"role": "user", "content": text})
             self.history.append({"role": "assistant", "content": reply})
 
-        print(f"> {reply}")
-        _notify("Resonance", reply)
+        if sources:
+            print(f"> {detail}")
+            print(f"  Spoken: {spoken}")
+            bad = check_citations(detail, sources)
+            if bad:
+                print(f"  ! Unsupported citations (not in attached excerpts): {', '.join(bad)}")
+        else:
+            print(f"> {reply}")
+        _notify("Resonance", spoken)
 
         if VOICE_OUTPUT:
             print("  Speaking...")
             self._speaking.set()
+            trace.mark("speech_start")
             try:
-                self.voice.speak(reply)
+                self.voice.speak(spoken)
+            except Exception as exc:
+                trace.status = "SPEECH_ERROR"
+                print(f"  [ERROR] speech failed ({exc}); reply is shown above as text.")
             finally:
                 self._speaking.clear()
+        logger.info(trace.summary())
+
+    def _interrupt_speech(self) -> None:
+        """Stop playback if speaking and record it on the turn being cut off."""
+        if self._speaking.is_set():
+            if self.last_turn:
+                self.last_turn.mark("interrupted")
+                self.last_turn.status = "INTERRUPTED"
+            self.voice.stop()
 
     def _start_hotkey_listener(self) -> None:
         def on_press(key):
             if key == HOTKEY:
-                if self._speaking.is_set():
-                    self.voice.stop()  # barge-in: cut off the current reply
+                self.turns.cancel()  # barge-in: any in-flight reply is now stale
+                self._interrupt_speech()  # cut off the current reply
                 self.capture.start()
 
         def on_release(key):
@@ -183,5 +314,48 @@ class Resonance:
             self.handle(typed, source="typed")
 
 
+def preflight(project: str | None = None, check_provider: bool = True) -> bool:
+    """Startup checks (brief B12). Prints one line per check, never a key."""
+    ok = True
+
+    def report(name, passed, detail=""):
+        nonlocal ok
+        ok = ok and passed
+        print(f"  [{'OK' if passed else 'FAIL'}] {name}" + (f": {detail}" if detail else ""))
+
+    for var in ("NVIDIA_API_KEY", "ELEVENLABS_API_KEY"):
+        report(var, bool(os.environ.get(var)), "" if os.environ.get(var) else "not set")
+    if project:
+        report("project root", os.path.isdir(os.path.expanduser(project)), project)
+    try:
+        import sounddevice as sd
+        sd.check_input_settings()
+        report("microphone", True)
+    except Exception as exc:
+        report("microphone", False, f"{exc} (typed input still works)")
+    if check_provider and os.environ.get("NVIDIA_API_KEY"):
+        try:
+            NimClient(NimConfig(api_key=os.environ["NVIDIA_API_KEY"], max_tokens=5)).chat(
+                [{"role": "user", "content": "ping"}], thinking=False)
+            report("NVIDIA NIM", True)
+        except Exception as exc:
+            report("NVIDIA NIM", False, str(exc)[:120])
+    return ok
+
+
+def _parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="Resonance voice companion")
+    parser.add_argument("--project", help="project root Resonance may inspect (read-only)")
+    parser.add_argument("--context", action="append", default=[],
+                        help="file to attach, relative to the project root (repeatable)")
+    parser.add_argument("--preflight", action="store_true", help="check setup and exit")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    Resonance().run()
+    args = _parse_args()
+    if args.preflight:
+        sys.exit(0 if preflight(args.project) else 1)
+    if args.context and not args.project:
+        sys.exit("--context requires --project")
+    Resonance(project=args.project, context=args.context).run()

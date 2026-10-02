@@ -62,9 +62,9 @@ class TestHandle:
     def test_speaking_flag_clears_even_if_speak_raises(self, app, monkeypatch):
         monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
         app.voice.speak.side_effect = RuntimeError("playback died")
-        with pytest.raises(RuntimeError):
-            app.handle("hello", source="typed")
+        app.handle("hello", source="typed")  # speech failure falls back to text
         assert not app._speaking.is_set()
+        assert app.last_turn.status == "SPEECH_ERROR"
 
     def test_only_recent_history_is_sent_to_nim(self, app, monkeypatch):
         monkeypatch.setattr(resonance, "VOICE_OUTPUT", False)
@@ -176,3 +176,75 @@ class TestRun:
         with patch.object(resonance.Resonance, "_start_hotkey_listener"), \
              patch("builtins.input", side_effect=KeyboardInterrupt):
             app.run()  # must return instead of raising
+
+
+class TestTurnsAndErrors:
+    def test_model_error_leaves_app_usable(self, app, capsys):
+        app.nim.chat.side_effect = RuntimeError("503")
+        app.handle("hello", source="typed")
+        assert "[ERROR]" in capsys.readouterr().out
+        assert app.history == [] and app.last_turn.status == "ERROR"
+
+    def test_stale_reply_is_dropped(self, app, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
+
+        def barge_in(*a, **k):
+            app.turns.cancel()  # user pressed the hotkey while the model was working
+            return "obsolete answer"
+
+        app.nim.chat.side_effect = barge_in
+        app.handle("hello", source="typed")
+        app.voice.speak.assert_not_called()
+        assert app.history == [] and app.last_turn.status == "STALE"
+
+    def test_hotkey_press_cancels_in_flight_turn(self, app):
+        on_press, _ = _wire_hotkey_listener(app)
+        tid = app.turns.begin()
+        on_press(resonance.HOTKEY)
+        assert not app.turns.is_current(tid)
+
+    def test_project_mode_disables_thinking_and_splits_speech(self, app, tmp_path, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
+        (tmp_path / "a.py").write_text("x = 1\n")
+        app.set_project(str(tmp_path))
+        app.attach("a.py")
+        app.nim.chat.return_value = "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"
+        app.handle("why", source="typed")
+        assert app.nim.chat.call_args.kwargs["thinking"] is False
+        app.voice.speak.assert_called_once_with("Short.")
+
+    def test_slash_commands_are_not_sent_to_model(self, app):
+        app.handle("/context", source="typed")
+        app.nim.chat.assert_not_called()
+
+
+class TestPreflight:
+    def test_reports_missing_keys(self, monkeypatch, capsys):
+        monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+        monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+        assert resonance.preflight(check_provider=False) is False
+        assert "[FAIL] NVIDIA_API_KEY" in capsys.readouterr().out
+
+
+class TestReviewFixes:
+    def test_interruption_is_recorded(self, app):
+        app.last_turn = resonance.TurnTrace(1, "voice")
+        app._speaking.set()
+        app._interrupt_speech()
+        app.voice.stop.assert_called_once()
+        assert app.last_turn.status == "INTERRUPTED" and "interrupted" in app.last_turn.marks
+
+    def test_turn_numbers_skip_cancels(self, app):
+        app.turns.cancel()
+        tid = app.turns.begin()
+        assert app.turns.number(tid) == 1
+
+    def test_spoken_line_printed_and_prompt_uses_real_path(self, app, tmp_path, capsys):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        app.set_project(str(tmp_path))
+        app.attach("a.py")
+        app.nim.chat.return_value = "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"
+        app.handle("why", source="typed")
+        assert "Spoken: Short." in capsys.readouterr().out
+        assert "a.py:1-1" in app.nim.chat.call_args.args[0][0]["content"]
+        assert "src/a.py" not in app.nim.chat.call_args.args[0][0]["content"]

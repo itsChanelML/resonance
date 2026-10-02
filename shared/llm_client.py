@@ -31,13 +31,18 @@ class NimClient:
         retry=retry_if_exception_type(requests.exceptions.RequestException),
         reraise=True,
     )
-    def chat(self, messages: list[dict], json_mode: bool = False) -> str:
+    def chat(self, messages: list[dict], json_mode: bool = False,
+             max_tokens: int | None = None, thinking: bool | None = None) -> str:
         payload = {
             "model": self.config.model,
             "messages": messages,
-            "max_tokens": self.config.max_tokens,
+            "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": self.config.temperature,
         }
+        if thinking is not None:
+            # Nemotron reasoning model: thinking off cuts project-prompt latency
+            # from ~30-85s to ~4s (measured live, see docs/BASELINE.md).
+            payload["chat_template_kwargs"] = {"enable_thinking": thinking}
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
@@ -59,4 +64,7 @@ class NimClient:
             if warning:
                 logger.warning(warning)
 
-        return response.json()["choices"][0]["message"]["content"]
+        content = response.json()["choices"][0]["message"].get("content")
+        if not content:
+            raise ValueError("model returned no content (reasoning may have used the token budget)")
+        return content
