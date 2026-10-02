@@ -133,10 +133,17 @@ resonance/
 │   ├── __init__.py
 │   ├── audio_io.py          # mic capture + local Whisper transcription
 │   ├── llm_client.py        # NVIDIA NIM client, retry/backoff, JSON mode
+│   ├── project_context.py   # read-only project root, exclusions, attachments
+│   ├── context_builder.py   # budgeted context, spoken/detail split, citation check
+│   ├── turn_controller.py   # turn IDs, stale-reply suppression
+│   ├── trace.py             # per-turn timing records
 │   ├── voice_out.py         # ElevenLabs Flash TTS client, streaming playback, barge-in
 │   └── usage.py               # local free-tier usage tracking, persisted to .usage.json
+├── docs/
+│   └── BASELINE.md          # audit of current behavior and live NIM measurements
 └── tests/
     ├── test_resonance.py     # handle(), hotkey/barge-in wiring, notify, run loop
+    ├── test_project_context.py  # boundaries, exclusions, redaction, citations
     ├── test_llm_client.py
     ├── test_voice_out.py
     ├── test_audio_io.py
@@ -270,6 +277,47 @@ The voice-only version: hold **F9**, talk, let go.
 First run of either app downloads the local Whisper model (~150MB),
 one-time cost.
 
+### 📂 Project mode
+
+```
+python resonance.py --project ./my_project --context src/retriever.py --context logs/eval.json
+```
+Point Resonance at a project and attach the files you want it to reason
+about. Answers are grounded in those excerpts: the full detail (observed
+evidence with `path:line` references, hypotheses, one next experiment,
+what's missing) prints in the terminal, and only a short summary is
+spoken. Citations that don't match an attached excerpt are flagged.
+
+Commands at the `>` prompt: `/project <dir>`, `/attach <file>`,
+`/context` (what's attached), `/preview` (the exact text that will be
+sent), `/clear`. Run `python resonance.py --preflight` to check keys,
+microphone, project root, and the NIM connection before a session.
+
+Rules it enforces:
+- **Read-only.** Resonance never writes to your project.
+- **Stays inside the root.** Paths are resolved first, so `../` and
+  symlinks pointing outside the project are blocked.
+- **Excluded by default:** `.env`, keys and credentials, `.git`,
+  `venv`/`node_modules`, build output, binaries, plus anything in your
+  `.gitignore` or a `.resonanceignore` file. Secret-like values in
+  attached files are redacted; that filter is a safety net, not a
+  guarantee.
+- **Fresh.** An attached file that changed on disk is re-read on the next
+  turn. Switching projects clears the conversation.
+
+**What leaves your machine:** your question, recent conversation, and
+the attached file excerpts go to NVIDIA NIM; only the spoken summary goes
+to ElevenLabs. Transcription runs locally. Use `/preview` to see the
+file text before sending.
+
+Project mode turns the model's thinking off to keep replies around 4-5
+seconds. With it on, the same prompt took 27-86 seconds in testing (see
+`docs/BASELINE.md`).
+
+**Status:** attaching files you choose works today. Searching the
+project, git diffs, an investigation recap, and running tests are
+planned, not built.
+
 ### 🧪 Running the tests
 
 ```
@@ -280,7 +328,8 @@ Everything's mocked, no API keys or microphone required. Covers the
 retry/backoff paths on both clients, the recording-length cap, the
 usage tracker's threshold/reset logic, and `resonance.py`'s own
 orchestration: `handle()`, hotkey/barge-in wiring, OS notifications,
-and the typed-input run loop.
+and the typed-input run loop. Also covers project-mode boundaries,
+exclusions, redaction, citation checks, and stale-reply handling.
 
 ---
 
@@ -320,8 +369,13 @@ Update this as milestones land. A stale roadmap is worse than none.
       (mocked, no live API calls)
 - [x] Unit tests for `resonance.py`'s own orchestration: `handle()`,
       hotkey/barge-in wiring, notifications, and the run loop
-- [ ] Feed real terminal output and git diffs into the prompt directly,
-      not just what's said or typed
+- [x] Project mode: attach files, read-only boundary, exclusions,
+      source references, short spoken summary with detail in the terminal
+- [x] Turn IDs so an interrupted or superseded reply is never spoken
+- [ ] Project search, file listing, and git diffs the model can request
+- [ ] Investigation memory and a short recap within a session
+- [ ] Feed real terminal output into the prompt directly, not just
+      what's said or typed
 - [ ] Stream the NIM reply itself and start speaking the first sentence
       before the rest has finished generating, rather than waiting for
       the full reply
