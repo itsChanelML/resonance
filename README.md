@@ -189,6 +189,26 @@ through the whole codebase.
   estimating from request/character counts, not reading either vendor's
   real billing API.
 
+- **`shared/project_context.py`**: `ProjectSession`. Owns the project
+  root, the exclusion policy (defaults, `.gitignore`, `.resonanceignore`),
+  secret redaction, and attachments. Every file read goes through it, so
+  the boundary lives in one place. Read-only.
+
+- **`shared/project_tools.py`**: `ProjectTools`. The four model-callable
+  tools (`list_files`, `search_code`, `read_file`, `git_diff`): argument
+  validation, output bounds, structured statuses. Never raises into the
+  caller.
+
+- **`shared/inspector.py`**: `run_inspection`. The bounded tool-calling
+  loop: rounds, deadline, output budget, cancellation. Knows nothing about
+  voice or the terminal.
+
+- **`shared/context_builder.py`**: prompts, the context budget, the
+  spoken/detail split, citation checks, and the turn hints.
+
+- **`shared/turn_controller.py`, `shared/trace.py`**: turn IDs with
+  stale-reply suppression, and per-turn timing records.
+
 - **`resonance.py`** — wires the shared modules together with two entry
   points into one handler: a hotkey for talking, a prompt for typing.
   Same reasoning, same voice, same output, regardless of which one you
@@ -208,24 +228,31 @@ through the whole codebase.
   🎧  local Whisper transcribes        (no API call)
         │
         ▼
-  🧠  Nemotron 3 Nano reasons          (1 NIM call)
-        │
+  🧠  Nemotron 3 Nano reasons          (1 NIM call; in project mode,
+        │                               several, see below)
         ▼
   🗣️  Eleven Flash speaks it back      (1 ElevenLabs call, ~75ms)
 ```
 
-1. Either input path fires: hold F9 and talk (routed through
-   `VoiceCapture` and local Whisper), or type at the prompt and hit
-   enter.
-2. `Resonance.handle()` sends the text to `NimClient.chat()` with a
-   short, direct system prompt tuned for something spoken, not read. One
-   NIM call.
+1. Either input path fires: hold the hotkey (right-Control by default;
+   `main.py` uses F9) and talk, routed through `VoiceCapture` and local
+   Whisper, or type at the prompt and hit enter.
+2. `Resonance.handle()` gives the turn an ID and sends the text to
+   `NimClient.chat()` with a short, direct system prompt tuned for
+   something spoken, not read. One NIM call.
 3. The reply prints to the terminal always, so it works with sound off.
    If `VOICE_OUTPUT` is enabled (the default), it also plays through
-   `ElevenLabsVoice.speak()`.
+   `ElevenLabsVoice.speak()`. If you press the hotkey or start another
+   turn first, the old reply is dropped and the old audio stops.
 
-One input event, one NIM call, one optional ElevenLabs call. No hidden
-polling, no continuous listening, no background cost between turns.
+**Project mode** (`--project`) changes step 2: the model may call the
+read-only tools, each a separate NIM call, before it answers. A typical
+turn is 2 to 7 NIM calls and takes 5 to 20 seconds; the loop is capped at
+6 tool rounds. The terminal shows the full evidence and file references,
+and only a short summary is spoken.
+
+No hidden polling, no continuous listening, no background cost between
+turns.
 
 ---
 
@@ -312,9 +339,15 @@ will be sent), `/trace` (last turn's timing and tool calls), `/clear`. Run
 `python resonance.py --preflight` to check keys, microphone, project root,
 and the NIM connection before a session.
 
+`git_diff` needs `git` installed; without it, or in a non-git folder, the
+tool reports that and the rest still works.
+
 To try it on a ready-made scenario (a RAG evaluation that regressed after
 a change), run `python scripts/build_demo_repo.py /tmp/rag_demo`, then
 `python resonance.py --project /tmp/rag_demo --context artifacts/eval_after.json`.
+The demo project has a deliberately failing test
+(`demo_projects/rag_regression/tests/test_prompt_builder.py`); it proves the
+seeded bug and is excluded from the main `pytest` run.
 
 Rules it enforces (for attachments and every tool):
 - **Read-only.** Resonance never writes to your project. Git runs with
@@ -336,7 +369,11 @@ to ElevenLabs. Transcription runs locally. Use `/preview` to see the
 file text before sending.
 
 Questions that challenge a claim or ask for a single experiment get extra
-guidance (`RESONANCE_TURN_HINTS=false` turns it off).
+guidance (`RESONANCE_TURN_HINTS=false` turns it off). Two experimental
+switches are off by default: `RESONANCE_FINAL_THINKING=true` rewrites the
+final answer with thinking on, and `RESONANCE_FINAL_MODEL=<nim model id>`
+rewrites it with a different model. Neither beat the hints alone in testing
+and both add latency (see `docs/BASELINE.md`).
 
 Project mode turns the model's thinking off to keep replies around 4-5
 seconds. With it on, the same prompt took 27-86 seconds in testing (see
@@ -345,7 +382,8 @@ seconds. With it on, the same prompt took 27-86 seconds in testing (see
 **Status:** attaching files, searching, reading, and git diffs work
 today. The model is small and sometimes cites a wider line range than it
 read or gets a detail wrong; the citation check flags those, so treat
-answers as leads to verify. An investigation recap that survives
+answers as leads to verify. Measured rehearsal results, including that the
+brief's release gate is not yet met, are in `docs/BASELINE.md`. An investigation recap that survives
 corrections, and running tests, are planned, not built.
 
 ### 🧪 Running the tests
@@ -365,8 +403,11 @@ exclusions, redaction, citation checks, and stale-reply handling.
 
 ## 💸 The free-tier math
 
-- **NVIDIA NIM**: ~1,000 signup credits, ~40 requests/minute. One
-  input event equals one NIM call.
+- **NVIDIA NIM**: ~1,000 signup credits, ~40 requests/minute. Without a
+  project, one input event equals one NIM call. In project mode each tool
+  round is another call, so a turn costs roughly 2 to 7. Expect the
+  request counter to climb faster, and occasional `503` errors when the
+  shared free tier is busy (the client retries 5 times).
 - **ElevenLabs Flash**: 10,000 credits/month (~10-20 min of audio).
   Replies are capped at a few spoken sentences by design.
 - **Whisper transcription**: fully local. No API call, no rate limit,
