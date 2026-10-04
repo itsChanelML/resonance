@@ -215,3 +215,38 @@ def check_citations(text: str, sources: list[ContextSource]) -> list[str]:
                 if cited is not None and not any(i in cited for i in idents):
                     bad.append(f"{ref} (cited lines do not contain {idents[0]})")
     return bad
+
+
+_CHALLENGE = re.compile(
+    r"what evidence|how do you know|why do you (think|say|believe)|what (makes|connects)|"
+    r"you (suggested|said|claimed)|are you sure", re.I)
+_EXPERIMENT = re.compile(
+    r"one experiment|which (comparison|experiment|test)|separates? (those|these|the)|isolate", re.I)
+
+CHALLENGE_HINT = (
+    "The user is challenging a claim. Do not restate your earlier diagnosis. "
+    "In the first sentence of SPOKEN say whether you actually made that claim, "
+    "and whether anything you have inspected supports it; if nothing does, say "
+    "you found no evidence for it. Then say what the evidence does show."
+)
+EXPERIMENT_HINT = (
+    "The user wants the single most informative experiment. Name the factors "
+    "that changed together, then propose one comparison that varies exactly one "
+    "of them while holding the inputs and the other change fixed (replaying "
+    "identical saved inputs through old and new code where possible). If "
+    "retrieval metrics such as recall are fine but answer quality dropped, the "
+    "cause is likely downstream of retrieval: hold the retrieved documents "
+    "fixed and vary how they are assembled into the prompt. A change to a "
+    "parameter that cannot alter what reaches the next stage tells you nothing. "
+    "State what stays fixed and what varies."
+)
+
+
+def turn_hint(text: str) -> str:
+    """Extra guidance for question types the model handles poorly with the
+    generic prompt alone. Applied to the model request only, never stored."""
+    if _CHALLENGE.search(text):
+        return CHALLENGE_HINT
+    if _EXPERIMENT.search(text):
+        return EXPERIMENT_HINT
+    return ""

@@ -52,7 +52,7 @@ load_dotenv()  # reads .env in the current directory, if present
 from shared.audio_io import VoiceCapture
 from shared.context_builder import (
     build_context_block, check_citations, compact_reply, hedge_spoken,
-    inspection_prompt, project_prompt, split_reply,
+    inspection_prompt, project_prompt, split_reply, turn_hint,
 )
 from shared.llm_client import NimClient, NimConfig
 from shared.inspector import INCOMPLETE, run_inspection
@@ -101,6 +101,11 @@ SYSTEM_PROMPT_PROJECT = (
     "You are Resonance, a voice-first engineering companion. Be precise and "
     "separate observed evidence from hypotheses."
 )
+
+# Answer-quality switches, measured in docs/BASELINE.md.
+TURN_HINTS = os.environ.get("RESONANCE_TURN_HINTS", "true").lower() != "false"
+FINAL_THINKING = os.environ.get("RESONANCE_FINAL_THINKING", "false").lower() == "true"
+FINAL_MODEL = os.environ.get("RESONANCE_FINAL_MODEL") or None
 
 MAX_HISTORY_TURNS = 6  # keep recent context only, so NIM calls stay cheap
 
@@ -262,7 +267,8 @@ class Resonance:
             if block:
                 system += "\n\nAttached files:\n\n" + block
         messages = [{"role": "system", "content": system}] + history
-        messages.append({"role": "user", "content": text})
+        hint = turn_hint(text) if (inspecting and TURN_HINTS) else ""
+        messages.append({"role": "user", "content": f"{text}\n\n[Guidance: {hint}]" if hint else text})
 
         evidence = list(sources) + self.ledger
         try:
@@ -272,6 +278,7 @@ class Resonance:
                     is_current=lambda: self.turns.is_current(turn_id),
                     on_call=self._print_call,
                     require_tool=len(text.split()) >= 4,  # skip for 'thanks'-style turns
+                    final_thinking=FINAL_THINKING, final_model=FINAL_MODEL,
                 )
                 trace.tool_calls = result.calls
                 evidence += result.evidence

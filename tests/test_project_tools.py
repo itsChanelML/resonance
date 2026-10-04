@@ -174,3 +174,13 @@ def test_first_hop_requires_a_tool_only_when_asked(tools):
     nim = FakeNim({"content": "done"})
     run_inspection(nim, [], tools)
     assert nim.choices == ["auto"]
+
+
+def test_final_hop_is_rewritten_only_when_enabled(tools):
+    nim = FakeNim({"content": "draft"}, {"content": "better"})
+    r = run_inspection(nim, [], tools, final_thinking=True)
+    assert r.reply == "better" and len(nim.calls) == 2 and nim.calls[1][1] is None
+    nim = FakeNim({"content": "draft"}, {"content": None})
+    assert run_inspection(nim, [], tools, final_thinking=True).reply == "draft"  # keeps draft on empty rewrite
+    nim = FakeNim({"content": "draft"})
+    assert run_inspection(nim, [], tools).reply == "draft" and len(nim.calls) == 1

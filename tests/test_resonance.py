@@ -280,3 +280,25 @@ class TestSessionEvidence:
         app.ledger.append(app.tools.read_file({"path": "a.py"}).sources[0])
         app.set_project(str(tmp_path))
         assert app.ledger == []
+
+
+class TestTurnHintsAndFinalHop:
+    def _project(self, app, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        app.set_project(str(tmp_path))
+
+    def test_hint_goes_to_model_but_not_history(self, app, tmp_path, monkeypatch):
+        self._project(app, tmp_path)
+        monkeypatch.setattr(resonance, "TURN_HINTS", True)
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
+        app.handle("What evidence connects this regression to the model?", source="typed")
+        sent = app.nim.chat_with_tools.call_args.args[0][-1]["content"]
+        assert "[Guidance:" in sent
+        assert app.history[0]["content"] == "What evidence connects this regression to the model?"
+
+    def test_hints_can_be_switched_off(self, app, tmp_path, monkeypatch):
+        self._project(app, tmp_path)
+        monkeypatch.setattr(resonance, "TURN_HINTS", False)
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
+        app.handle("What evidence connects this regression to the model?", source="typed")
+        assert "[Guidance:" not in app.nim.chat_with_tools.call_args.args[0][-1]["content"]

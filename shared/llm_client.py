@@ -25,9 +25,9 @@ class NimClient:
         self.config = config
         self.usage = usage  # optional shared.usage.UsageTracker
 
-    def _payload(self, messages, max_tokens, thinking, extra=None) -> dict:
+    def _payload(self, messages, max_tokens, thinking, extra=None, model=None) -> dict:
         payload = {
-            "model": self.config.model,
+            "model": model or self.config.model,
             "messages": messages,
             "max_tokens": max_tokens or self.config.max_tokens,
             "temperature": self.config.temperature,
@@ -76,9 +76,9 @@ class NimClient:
 
     def chat_with_tools(self, messages: list[dict], tools: list[dict] | None,
                         max_tokens: int | None = None, thinking: bool | None = None,
-                        tool_choice: str = "auto") -> dict:
+                        tool_choice: str = "auto", model: str | None = None) -> dict:
         """One model hop that may return tool_calls instead of content.
         Returns the raw assistant message dict."""
         extra = {"tools": tools, "tool_choice": tool_choice} if tools else None
-        data = self._post(self._payload(messages, max_tokens, thinking, extra))
+        data = self._post(self._payload(messages, max_tokens, thinking, extra, model))
         return data["choices"][0]["message"]

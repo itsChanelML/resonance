@@ -34,7 +34,9 @@ def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
                    max_rounds: int = MAX_ROUNDS, deadline_s: float = DEADLINE_S,
                    is_current: Callable[[], bool] = lambda: True,
                    on_call: Callable[[dict], None] | None = None,
-                   max_tokens: int = 900, require_tool: bool = False) -> InspectionResult:
+                   max_tokens: int = 900, require_tool: bool = False,
+                   final_thinking: bool = False, final_model: str | None = None,
+                   final_max_tokens: int = 2000) -> InspectionResult:
     messages = list(messages)
     started = time.monotonic()
     evidence: list[ContextSource] = []
@@ -62,6 +64,15 @@ def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
             if not is_current():
                 return InspectionResult(None, CANCELLED, evidence, calls)
             content = msg.get("content")
+            if content and (final_thinking or final_model):
+                # Tool use stays on the fast path; the answer itself is rewritten
+                # with thinking on and/or a larger model. Keep the draft if that fails.
+                kwargs = {"model": final_model} if final_model else {}
+                better = nim.chat_with_tools(messages, None, max_tokens=final_max_tokens,
+                                             thinking=final_thinking, **kwargs)
+                content = better.get("content") or content
+                if not is_current():
+                    return InspectionResult(None, CANCELLED, evidence, calls)
             if content:
                 return InspectionResult(content, COMPLETE, evidence, calls)
             reason = "model returned an empty answer"

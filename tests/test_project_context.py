@@ -140,3 +140,15 @@ def test_section_header_is_not_treated_as_an_identifier(tmp_path):
     sess = ProjectSession(tmp_path)
     sess.attach("a.py")
     assert check_citations("OBSERVATIONS: x is set at a.py:1-1", list(sess.attachments.values())) == []
+
+
+def test_turn_hint_routes_challenges_and_experiments_only():
+    from shared.context_builder import CHALLENGE_HINT, EXPERIMENT_HINT, turn_hint
+    assert turn_hint("You suggested changing the model. What evidence connects this?") == CHALLENGE_HINT
+    assert turn_hint("We only have time for one experiment. Which comparison separates those causes?") == EXPERIMENT_HINT
+    assert turn_hint("Find where build evidence is called.") == ""
+
+
+def test_experiment_hint_prefers_holding_retrieval_fixed():
+    from shared.context_builder import EXPERIMENT_HINT
+    assert "downstream of retrieval" in EXPERIMENT_HINT and "retrieved documents" in EXPERIMENT_HINT

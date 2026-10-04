@@ -335,6 +335,9 @@ through its tools go to NVIDIA NIM; only the spoken summary goes
 to ElevenLabs. Transcription runs locally. Use `/preview` to see the
 file text before sending.
 
+Questions that challenge a claim or ask for a single experiment get extra
+guidance (`RESONANCE_TURN_HINTS=false` turns it off).
+
 Project mode turns the model's thinking off to keep replies around 4-5
 seconds. With it on, the same prompt took 27-86 seconds in testing (see
 `docs/BASELINE.md`).
