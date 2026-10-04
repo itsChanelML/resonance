@@ -1,0 +1,89 @@
+{
+  "top_k": 5,
+  "summary": {
+    "retrieval_recall": 1.0,
+    "grounded_accuracy": 0.25
+  },
+  "cases": [
+    {
+      "case_id": "q1",
+      "question": "How long is the refund window?",
+      "supporting_doc": "d1",
+      "retrieved_ids": [
+        "d1",
+        "d2",
+        "d3",
+        "d4",
+        "d5"
+      ],
+      "evidence_ids": [
+        "d1"
+      ],
+      "answer": "The refund window is 30 days from the delivery date.",
+      "scores": {
+        "retrieval_recall": 1,
+        "grounded_accuracy": 1
+      }
+    },
+    {
+      "case_id": "q2",
+      "question": "When are refunds issued after the refund window?",
+      "supporting_doc": "d2",
+      "retrieved_ids": [
+        "d1",
+        "d2",
+        "d3",
+        "d4",
+        "d5"
+      ],
+      "evidence_ids": [
+        "d1"
+      ],
+      "answer": "I do not know.",
+      "scores": {
+        "retrieval_recall": 1,
+        "grounded_accuracy": 0
+      }
+    },
+    {
+      "case_id": "q3",
+      "question": "Is free shipping available for premium orders over 50 dollars within 5 business days?",
+      "supporting_doc": "d7",
+      "retrieved_ids": [
+        "d3",
+        "d4",
+        "d7",
+        "d2",
+        "d1"
+      ],
+      "evidence_ids": [
+        "d3"
+      ],
+      "answer": "I do not know.",
+      "scores": {
+        "retrieval_recall": 1,
+        "grounded_accuracy": 0
+      }
+    },
+    {
+      "case_id": "q4",
+      "question": "When can orders with standard shipping and refunds be cancelled?",
+      "supporting_doc": "d8",
+      "retrieved_ids": [
+        "d3",
+        "d4",
+        "d7",
+        "d8",
+        "d2"
+      ],
+      "evidence_ids": [
+        "d3"
+      ],
+      "answer": "I do not know.",
+      "scores": {
+        "retrieval_recall": 1,
+        "grounded_accuracy": 0
+      }
+    }
+  ]
+}

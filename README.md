@@ -134,16 +134,24 @@ resonance/
 │   ├── audio_io.py          # mic capture + local Whisper transcription
 │   ├── llm_client.py        # NVIDIA NIM client, retry/backoff, JSON mode
 │   ├── project_context.py   # read-only project root, exclusions, attachments
+│   ├── project_tools.py     # list_files, search_code, read_file, git_diff (validated, bounded)
+│   ├── inspector.py         # bounded tool-calling loop (6 rounds, 30s, output budget)
 │   ├── context_builder.py   # budgeted context, spoken/detail split, citation check
 │   ├── turn_controller.py   # turn IDs, stale-reply suppression
 │   ├── trace.py             # per-turn timing records
 │   ├── voice_out.py         # ElevenLabs Flash TTS client, streaming playback, barge-in
 │   └── usage.py               # local free-tier usage tracking, persisted to .usage.json
+├── demo_projects/
+│   └── rag_regression/      # synthetic RAG project with a seeded evidence bug
+├── scripts/
+│   ├── design_voice.py
+│   └── build_demo_repo.py   # builds a git repo of the demo with a real uncommitted diff
 ├── docs/
 │   └── BASELINE.md          # audit of current behavior and live NIM measurements
 └── tests/
     ├── test_resonance.py     # handle(), hotkey/barge-in wiring, notify, run loop
     ├── test_project_context.py  # boundaries, exclusions, redaction, citations
+    ├── test_project_tools.py    # tool validation, git, inspection loop
     ├── test_llm_client.py
     ├── test_voice_out.py
     ├── test_audio_io.py
@@ -288,13 +296,29 @@ evidence with `path:line` references, hypotheses, one next experiment,
 what's missing) prints in the terminal, and only a short summary is
 spoken. Citations that don't match an attached excerpt are flagged.
 
-Commands at the `>` prompt: `/project <dir>`, `/attach <file>`,
-`/context` (what's attached), `/preview` (the exact text that will be
-sent), `/clear`. Run `python resonance.py --preflight` to check keys,
-microphone, project root, and the NIM connection before a session.
+With a project selected, the model can also inspect it on its own through
+four read-only tools: `list_files`, `search_code` (literal text),
+`read_file` (max 200 lines per call), and `git_diff` (unstaged, staged,
+or against a commit). Each call is validated and shown as it happens, e.g.
+`[tool] git_diff(target='unstaged') -> OK`. An investigation stops after 6
+tool rounds, 30 seconds, or a fixed output budget, and then answers with
+what it has and says what is missing. Citations are checked against
+everything inspected this session; evidence from a file that has since
+changed is forgotten.
 
-Rules it enforces:
-- **Read-only.** Resonance never writes to your project.
+Commands at the `>` prompt: `/project <dir>`, `/attach <file>`,
+`/context` (what's attached), `/preview` (the exact attached text that
+will be sent), `/trace` (last turn's timing and tool calls), `/clear`. Run
+`python resonance.py --preflight` to check keys, microphone, project root,
+and the NIM connection before a session.
+
+To try it on a ready-made scenario (a RAG evaluation that regressed after
+a change), run `python scripts/build_demo_repo.py /tmp/rag_demo`, then
+`python resonance.py --project /tmp/rag_demo --context artifacts/eval_after.json`.
+
+Rules it enforces (for attachments and every tool):
+- **Read-only.** Resonance never writes to your project. Git runs with
+  fixed arguments, never a model-written command.
 - **Stays inside the root.** Paths are resolved first, so `../` and
   symlinks pointing outside the project are blocked.
 - **Excluded by default:** `.env`, keys and credentials, `.git`,
@@ -305,8 +329,9 @@ Rules it enforces:
 - **Fresh.** An attached file that changed on disk is re-read on the next
   turn. Switching projects clears the conversation.
 
-**What leaves your machine:** your question, recent conversation, and
-the attached file excerpts go to NVIDIA NIM; only the spoken summary goes
+**What leaves your machine:** your question, recent conversation, the
+attached file excerpts, and any file lines or diffs the model reads
+through its tools go to NVIDIA NIM; only the spoken summary goes
 to ElevenLabs. Transcription runs locally. Use `/preview` to see the
 file text before sending.
 
@@ -314,9 +339,11 @@ Project mode turns the model's thinking off to keep replies around 4-5
 seconds. With it on, the same prompt took 27-86 seconds in testing (see
 `docs/BASELINE.md`).
 
-**Status:** attaching files you choose works today. Searching the
-project, git diffs, an investigation recap, and running tests are
-planned, not built.
+**Status:** attaching files, searching, reading, and git diffs work
+today. The model is small and sometimes cites a wider line range than it
+read or gets a detail wrong; the citation check flags those, so treat
+answers as leads to verify. An investigation recap that survives
+corrections, and running tests, are planned, not built.
 
 ### 🧪 Running the tests
 
@@ -372,7 +399,9 @@ Update this as milestones land. A stale roadmap is worse than none.
 - [x] Project mode: attach files, read-only boundary, exclusions,
       source references, short spoken summary with detail in the terminal
 - [x] Turn IDs so an interrupted or superseded reply is never spoken
-- [ ] Project search, file listing, and git diffs the model can request
+- [x] Project search, file listing, line-range reads, and git diffs the
+      model can request, with a bounded inspection loop
+- [x] Citation check against everything inspected this session
 - [ ] Investigation memory and a short recap within a session
 - [ ] Feed real terminal output into the prompt directly, not just
       what's said or typed

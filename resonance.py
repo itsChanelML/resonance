@@ -51,10 +51,13 @@ load_dotenv()  # reads .env in the current directory, if present
 
 from shared.audio_io import VoiceCapture
 from shared.context_builder import (
-    build_context_block, check_citations, project_prompt, split_reply,
+    build_context_block, check_citations, compact_reply, hedge_spoken,
+    inspection_prompt, project_prompt, split_reply,
 )
 from shared.llm_client import NimClient, NimConfig
+from shared.inspector import INCOMPLETE, run_inspection
 from shared.project_context import ProjectSession
+from shared.project_tools import ProjectTools
 from shared.trace import TurnTrace
 from shared.turn_controller import TurnController
 from shared.usage import UsageTracker
@@ -121,7 +124,9 @@ def _notify(title: str, message: str) -> None:
 class Resonance:
     def __init__(self, project: str | None = None, context: list[str] | None = None):
         self.project: ProjectSession | None = None
+        self.tools: ProjectTools | None = None
         self.last_trace: list[dict] = []
+        self.ledger: list = []  # everything inspected this session, for citation checks
         self.capture = VoiceCapture()
         self.usage = UsageTracker()
         self.nim = NimClient(NimConfig(api_key=os.environ["NVIDIA_API_KEY"]), usage=self.usage)
@@ -142,6 +147,8 @@ class Resonance:
 
     def set_project(self, root: str) -> None:
         self.project = ProjectSession(root)
+        self.tools = ProjectTools(self.project)
+        self.ledger.clear()
         with self._history_lock:
             self.history.clear()  # don't carry another project's context over
         print(f"  Project: {self.project.root}")
@@ -162,6 +169,25 @@ class Resonance:
             notes.append(f"{src.redactions} secret-like value(s) redacted")
         suffix = f" ({', '.join(notes)})" if notes else ""
         print(f"  Attached {src.ref}, {len(src.content)} chars{suffix}")
+
+    def _prune_ledger(self) -> None:
+        """Forget inspected evidence whose file changed since it was read, so
+        old observations cannot be cited as if still true."""
+        root = self.project.root
+        fresh = []
+        for src in self.ledger:
+            try:
+                if (root / src.path).stat().st_mtime <= src.captured_at:
+                    fresh.append(src)
+            except OSError:
+                pass
+        self.ledger[:] = fresh
+
+    @staticmethod
+    def _print_call(call: dict) -> None:
+        args = ", ".join(f"{k}={v!r}" for k, v in (call["args"] or {}).items()) if isinstance(call["args"], dict) else "?"
+        flag = " (truncated)" if call["truncated"] else ""
+        print(f"  [tool] {call['tool']}({args}) -> {call['status']}{flag}")
 
     def _command(self, text: str) -> bool:
         """Handles /project, /attach, /context. Returns True if consumed."""
@@ -184,6 +210,14 @@ class Resonance:
                 for t in trace:
                     flag = " (omitted for budget)" if t["omitted_for_budget"] else ""
                     print(f"  {t['path']}  lines {t['lines']}  {t['chars_sent']} chars{flag}")
+        elif cmd == "/trace":
+            t = self.last_turn
+            if not t:
+                print("  No turns yet.")
+            else:
+                print(f"  {t.summary()}")
+                for c in getattr(t, "tool_calls", []):
+                    print(f"  [tool] {c['tool']} {c['args']} -> {c['status']} ({c['chars']} chars)")
         elif cmd == "/preview":
             if not self.project or not self.project.attachments:
                 print("  No context attached.")
@@ -194,9 +228,10 @@ class Resonance:
         elif cmd == "/clear":
             if self.project:
                 self.project.clear()
+            self.ledger.clear()
             print("  Context cleared.")
         else:
-            print("  Commands: /project <dir>, /attach <file>, /context, /preview, /clear")
+            print("  Commands: /project <dir>, /attach <file>, /context, /preview, /trace, /clear")
         return True
 
     def handle(self, text: str, source: str) -> None:
@@ -215,19 +250,40 @@ class Resonance:
             history = self.history[-MAX_HISTORY_TURNS:]
         system = SYSTEM_PROMPT
         sources = []
-        if self.project and self.project.attachments:
+        inspecting = self.tools is not None
+        if inspecting:
             for rel in self.project.refresh_stale():
                 print(f"  (re-read {rel}: file changed)")
+            self._prune_ledger()
             sources = list(self.project.attachments.values())
             block, self.last_trace = build_context_block(sources)
             trace.context = self.last_trace
-            system = SYSTEM_PROMPT_PROJECT + project_prompt(sources) + "\n\n" + block
+            system = SYSTEM_PROMPT_PROJECT + inspection_prompt(sources)
+            if block:
+                system += "\n\nAttached files:\n\n" + block
         messages = [{"role": "system", "content": system}] + history
         messages.append({"role": "user", "content": text})
 
+        evidence = list(sources) + self.ledger
         try:
-            if sources:
-                reply = self.nim.chat(messages, max_tokens=900, thinking=False)
+            if inspecting:
+                result = run_inspection(
+                    self.nim, messages, self.tools,
+                    is_current=lambda: self.turns.is_current(turn_id),
+                    on_call=self._print_call,
+                    require_tool=len(text.split()) >= 4,  # skip for 'thanks'-style turns
+                )
+                trace.tool_calls = result.calls
+                evidence += result.evidence
+                self.ledger.extend(result.evidence)
+                reply = result.reply
+                if result.status == INCOMPLETE:
+                    print(f"  ! Investigation incomplete: {result.reason}")
+                if reply is None:
+                    if not self.turns.is_current(turn_id):
+                        trace.status = "STALE"
+                        return
+                    raise ValueError("no answer produced")
             else:
                 reply = self.nim.chat(messages)
         except Exception as exc:
@@ -242,17 +298,20 @@ class Resonance:
             logger.info("dropped stale reply for turn %s", turn_id)
             return
 
-        spoken, detail = split_reply(reply) if sources else (reply, reply)
+        spoken, detail = split_reply(reply) if inspecting else (reply, reply)
+        if inspecting:
+            spoken = hedge_spoken(spoken, reply)
         with self._history_lock:
             self.history.append({"role": "user", "content": text})
-            self.history.append({"role": "assistant", "content": reply})
+            self.history.append({"role": "assistant",
+                                 "content": compact_reply(reply) if inspecting else reply})
 
-        if sources:
+        if inspecting:
             print(f"> {detail}")
             print(f"  Spoken: {spoken}")
-            bad = check_citations(detail, sources)
+            bad = check_citations(detail, evidence)
             if bad:
-                print(f"  ! Unsupported citations (not in attached excerpts): {', '.join(bad)}")
+                print(f"  ! Unsupported citations (not in anything inspected this session): {', '.join(bad)}")
         else:
             print(f"> {reply}")
         _notify("Resonance", spoken)

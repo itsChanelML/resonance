@@ -25,14 +25,7 @@ class NimClient:
         self.config = config
         self.usage = usage  # optional shared.usage.UsageTracker
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        retry=retry_if_exception_type(requests.exceptions.RequestException),
-        reraise=True,
-    )
-    def chat(self, messages: list[dict], json_mode: bool = False,
-             max_tokens: int | None = None, thinking: bool | None = None) -> str:
+    def _payload(self, messages, max_tokens, thinking, extra=None) -> dict:
         payload = {
             "model": self.config.model,
             "messages": messages,
@@ -43,9 +36,16 @@ class NimClient:
             # Nemotron reasoning model: thinking off cuts project-prompt latency
             # from ~30-85s to ~4s (measured live, see docs/BASELINE.md).
             payload["chat_template_kwargs"] = {"enable_thinking": thinking}
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
+        payload.update(extra or {})
+        return payload
 
+    @retry(
+        stop=stop_after_attempt(5),  # free tier returns frequent 503s under load
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type(requests.exceptions.RequestException),
+        reraise=True,
+    )
+    def _post(self, payload: dict) -> dict:
         response = requests.post(
             NIM_URL,
             headers={
@@ -63,8 +63,22 @@ class NimClient:
             warning = self.usage.record_nim_request()
             if warning:
                 logger.warning(warning)
+        return response.json()
 
-        content = response.json()["choices"][0]["message"].get("content")
+    def chat(self, messages: list[dict], json_mode: bool = False,
+             max_tokens: int | None = None, thinking: bool | None = None) -> str:
+        extra = {"response_format": {"type": "json_object"}} if json_mode else None
+        data = self._post(self._payload(messages, max_tokens, thinking, extra))
+        content = data["choices"][0]["message"].get("content")
         if not content:
             raise ValueError("model returned no content (reasoning may have used the token budget)")
         return content
+
+    def chat_with_tools(self, messages: list[dict], tools: list[dict] | None,
+                        max_tokens: int | None = None, thinking: bool | None = None,
+                        tool_choice: str = "auto") -> dict:
+        """One model hop that may return tool_calls instead of content.
+        Returns the raw assistant message dict."""
+        extra = {"tools": tools, "tool_choice": tool_choice} if tools else None
+        data = self._post(self._payload(messages, max_tokens, thinking, extra))
+        return data["choices"][0]["message"]

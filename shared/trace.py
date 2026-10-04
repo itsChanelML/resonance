@@ -10,6 +10,7 @@ class TurnTrace:
         self.source = source
         self.marks: dict[str, float] = {"start": time.monotonic()}
         self.context: list[dict] = []
+        self.tool_calls: list[dict] = []
         self.status = "OK"
 
     def mark(self, stage: str) -> None:

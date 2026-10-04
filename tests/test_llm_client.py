@@ -50,7 +50,7 @@ def test_chat_reraises_after_exhausting_retries():
     with patch("shared.llm_client.requests.post", side_effect=requests.exceptions.ConnectionError("down")) as mock_post:
         with pytest.raises(requests.exceptions.ConnectionError):
             client.chat([{"role": "user", "content": "hello"}])
-    assert mock_post.call_count == 3  # stop_after_attempt(3)
+    assert mock_post.call_count == 5  # stop_after_attempt(5)
 
 
 def test_chat_records_usage_on_success():

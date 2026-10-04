@@ -1,0 +1,2 @@
+Answer the customer question using only the evidence passages provided.
+If the evidence does not contain the answer, say you do not know.

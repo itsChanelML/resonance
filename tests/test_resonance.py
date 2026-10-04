@@ -208,9 +208,9 @@ class TestTurnsAndErrors:
         (tmp_path / "a.py").write_text("x = 1\n")
         app.set_project(str(tmp_path))
         app.attach("a.py")
-        app.nim.chat.return_value = "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"}
         app.handle("why", source="typed")
-        assert app.nim.chat.call_args.kwargs["thinking"] is False
+        assert app.nim.chat_with_tools.call_args.kwargs["thinking"] is False
         app.voice.speak.assert_called_once_with("Short.")
 
     def test_slash_commands_are_not_sent_to_model(self, app):
@@ -243,8 +243,40 @@ class TestReviewFixes:
         (tmp_path / "a.py").write_text("x = 1\n")
         app.set_project(str(tmp_path))
         app.attach("a.py")
-        app.nim.chat.return_value = "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"}
         app.handle("why", source="typed")
         assert "Spoken: Short." in capsys.readouterr().out
-        assert "a.py:1-1" in app.nim.chat.call_args.args[0][0]["content"]
-        assert "src/a.py" not in app.nim.chat.call_args.args[0][0]["content"]
+        system = app.nim.chat_with_tools.call_args.args[0][0]["content"]
+        assert "a.py:1-1" in system and "src/a.py" not in system
+
+
+class TestSessionEvidence:
+    def _project(self, app, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\ny = 2\n")
+        app.set_project(str(tmp_path))
+
+    def test_citation_from_earlier_turn_is_not_flagged(self, app, tmp_path, capsys):
+        self._project(app, tmp_path)
+        read = {"content": None, "tool_calls": [{"id": "1", "type": "function", "function": {
+            "name": "read_file", "arguments": '{"path": "a.py"}'}}]}
+        app.nim.chat_with_tools.side_effect = [read, {"content": "SPOKEN: ok\nOBSERVATIONS:\n- a.py:1-2 x"},
+                                               {"content": "SPOKEN: again\nOBSERVATIONS:\n- a.py:2-2 y"}]
+        app.handle("first", source="typed")
+        app.handle("second", source="typed")  # no tool call this turn
+        assert "Unsupported citations" not in capsys.readouterr().out
+
+    def test_changed_file_evidence_is_forgotten(self, app, tmp_path):
+        import os, time
+        self._project(app, tmp_path)
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
+        app.ledger.append(app.tools.read_file({"path": "a.py"}).sources[0])
+        future = time.time() + 5
+        os.utime(tmp_path / "a.py", (future, future))
+        app._prune_ledger()
+        assert app.ledger == []
+
+    def test_switching_project_clears_ledger(self, app, tmp_path):
+        self._project(app, tmp_path)
+        app.ledger.append(app.tools.read_file({"path": "a.py"}).sources[0])
+        app.set_project(str(tmp_path))
+        assert app.ledger == []

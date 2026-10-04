@@ -18,6 +18,8 @@ BLOCKED = "BLOCKED"
 TOO_LARGE = "TOO_LARGE"
 UNSUPPORTED = "UNSUPPORTED"
 ERROR = "ERROR"
+TIMEOUT = "TIMEOUT"
+NOT_GIT = "NOT_GIT"
 
 SUPPORTED_SUFFIXES = {
     ".py", ".js", ".ts", ".tsx", ".jsx", ".go", ".rs", ".java", ".c", ".h",
@@ -65,6 +67,16 @@ class ToolResult:
     status: str
     message: str = ""
     sources: list = field(default_factory=list)
+    output: str = ""  # text handed back to the model by tools
+    truncated: bool = False
+
+
+def redact(line: str) -> tuple[str, int]:
+    count = 0
+    for pattern in SECRET_PATTERNS:
+        line, n = pattern.subn("[REDACTED]", line)
+        count += n
+    return line, count
 
 
 class ProjectSession:
@@ -149,9 +161,8 @@ class ProjectSession:
         redactions = 0
         cleaned = []
         for line in excerpt:
-            for pattern in SECRET_PATTERNS:
-                line, n = pattern.subn("[REDACTED]", line)
-                redactions += n
+            line, n = redact(line)
+            redactions += n
             cleaned.append(line)
         content = "\n".join(cleaned)
         source = ContextSource(

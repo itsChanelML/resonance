@@ -2,7 +2,9 @@ import os
 
 import pytest
 
-from shared.context_builder import check_citations, split_reply, build_context_block
+from shared.context_builder import (
+    build_context_block, check_citations, compact_reply, hedge_spoken, missing_items, split_reply,
+)
 from shared.project_context import ProjectSession
 
 
@@ -83,3 +85,58 @@ def test_unicode_hyphen_and_lines_citation(proj):
 def test_missing_spoken_falls_back_to_next_line():
     spoken, detail = split_reply("OBSERVATIONS:\n- a.py:1-2 x\nNEXT: Print docs length.\nMISSING: none")
     assert spoken == "Print docs length." and "OBSERVATIONS" in detail
+
+
+def test_fallback_never_reads_labels_or_citations_aloud():
+    spoken, _ = split_reply("OBSERVATIONS: - a.py:1-2 shows x is one HYPOTHESES: maybe")
+    assert spoken == "shows x is one" or "OBSERVATIONS" not in spoken and "a.py" not in spoken
+    long_reply = "OBSERVATIONS: " + "word " * 100
+    assert len(split_reply(long_reply)[0].split()) <= 46
+
+
+LATE = "OBSERVATIONS:\n- a.py:1-2 f\nNEXT: Print docs.\nMISSING: the retriever code\nSPOKEN: The retriever ties are broken in order."
+
+
+def test_spoken_can_come_last_and_is_removed_from_detail():
+    spoken, detail = split_reply(LATE)
+    assert spoken == "The retriever ties are broken in order." and "SPOKEN" not in detail
+    assert detail.endswith("MISSING: the retriever code")
+
+
+def test_spoken_is_hedged_when_something_is_missing():
+    spoken, _ = split_reply(LATE)
+    assert missing_items(LATE) == "the retriever code"
+    assert hedge_spoken(spoken, LATE).startswith("Not fully confirmed.")
+    assert hedge_spoken("This is likely the cause.", LATE) == "This is likely the cause."
+    assert hedge_spoken(spoken, LATE.replace("the retriever code", "none")) == spoken
+
+
+def test_compact_reply_keeps_spoken_only():
+    out = compact_reply(LATE)
+    assert out == "The retriever ties are broken in order."
+
+
+def test_citation_content_check(tmp_path):
+    (tmp_path / "pb.py").write_text("\n".join(["# c", "MAX = 1", "", "x = 2"]))
+    sess = ProjectSession(tmp_path)
+    sess.attach("pb.py")
+    srcs = list(sess.attachments.values())
+    assert check_citations("- `MAX` is 1 at pb.py:2-2", srcs) == []
+    flagged = check_citations("- `MAX` is 1 at pb.py:3-3", srcs)
+    assert flagged and "do not contain MAX" in flagged[0]
+    assert check_citations("- it is plain at pb.py:3-3", srcs) == []  # no identifier to check
+
+
+def test_inline_sections_and_bullet_prefix():
+    reply = "OBSERVATIONS: a.py:1-2 f HYPOTHESES: maybe NEXT: Print docs. MISSING: none SPOKEN: - It keeps order."
+    spoken, detail = split_reply(reply)
+    assert spoken == "It keeps order." and "SPOKEN" not in detail and "NEXT: Print docs." in detail
+    assert missing_items(reply) == ""
+    assert compact_reply(reply) == "It keeps order."
+
+
+def test_section_header_is_not_treated_as_an_identifier(tmp_path):
+    (tmp_path / "a.py").write_text("x = 1\n")
+    sess = ProjectSession(tmp_path)
+    sess.attach("a.py")
+    assert check_citations("OBSERVATIONS: x is set at a.py:1-1", list(sess.attachments.values())) == []

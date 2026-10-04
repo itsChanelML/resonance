@@ -1,0 +1,2 @@
+# Retrieval settings for the demo QA pipeline.
+top_k: 3
