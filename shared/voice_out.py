@@ -29,7 +29,7 @@ class ElevenLabsVoice:
         retry=retry_if_exception_type(requests.exceptions.RequestException),
         reraise=True,
     )
-    def speak(self, text: str) -> None:
+    def speak(self, text: str, on_first_chunk=None) -> None:
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream"
         response = requests.post(
             url,
@@ -83,6 +83,11 @@ class ElevenLabsVoice:
                     player.stdin.write(chunk)
                 except (BrokenPipeError, OSError):
                     break  # player exited early (e.g. interrupted via stop())
+                if on_first_chunk is not None:
+                    # Closest measurable point to "first audible output": the
+                    # first audio bytes are now in the player's pipe.
+                    on_first_chunk()
+                    on_first_chunk = None
         finally:
             try:
                 player.stdin.close()

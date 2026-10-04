@@ -53,7 +53,7 @@ load_dotenv()  # reads .env in the current directory, if present
 from shared.audio_io import VoiceCapture
 from shared.context_builder import (
     build_context_block, check_citations, compact_reply, hedge_spoken,
-    inspection_prompt, project_prompt, split_reply, turn_hint,
+    inspection_prompt, project_prompt, revision_issues, split_reply, turn_hint,
 )
 from shared.llm_client import NimClient, NimConfig
 from shared.investigation_state import (
@@ -110,6 +110,8 @@ SYSTEM_PROMPT_PROJECT = (
 TURN_HINTS = os.environ.get("RESONANCE_TURN_HINTS", "true").lower() != "false"
 FINAL_THINKING = os.environ.get("RESONANCE_FINAL_THINKING", "false").lower() == "true"
 FINAL_MODEL = os.environ.get("RESONANCE_FINAL_MODEL") or None
+
+REVISE = os.environ.get("RESONANCE_REVISE", "true").lower() != "false"
 
 MAX_HISTORY_TURNS = 6  # keep recent context only, so NIM calls stay cheap
 
@@ -280,7 +282,7 @@ class Resonance:
         self._speaking.set()
         trace.mark("speech_start")
         try:
-            self.voice.speak(spoken)
+            self.voice.speak(spoken, on_first_chunk=lambda: trace.mark("first_audio"))
         except Exception as exc:
             trace.status = "SPEECH_ERROR"
             print(f"  [ERROR] speech failed ({exc}); reply is shown above as text.")
@@ -373,8 +375,11 @@ class Resonance:
                     on_call=self._print_call,
                     require_tool=len(text.split()) >= 4,  # skip for 'thanks'-style turns
                     final_thinking=FINAL_THINKING, final_model=FINAL_MODEL,
+                    validate=(lambda r, turn_ev: revision_issues(r, sources + self.ledger + turn_ev)) if REVISE else None,
+                    on_revise=lambda issues: print("  (checking an issue in the draft answer: " + issues[0][:70] + "...)"),
                 )
                 trace.tool_calls = result.calls
+                trace.revisions = result.revisions
                 evidence += result.evidence
                 self.ledger.extend(result.evidence)
                 reply = result.reply
@@ -383,6 +388,7 @@ class Resonance:
                 if reply is None:
                     if not self.turns.is_current(turn_id):
                         trace.status = "STALE"
+                        trace.mark("cancelled")
                         return
                     raise ValueError("no answer produced")
             else:

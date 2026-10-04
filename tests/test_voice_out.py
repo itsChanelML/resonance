@@ -80,3 +80,12 @@ def test_stop_is_noop_when_nothing_is_playing():
     voice = ElevenLabsVoice(api_key="key")
     voice.stop()  # should not raise
     assert voice._interrupted is True
+
+
+def test_speak_reports_first_chunk_once():
+    voice = ElevenLabsVoice(api_key="key")
+    seen = []
+    with patch("shared.voice_out.requests.post", return_value=_stream_response()), \
+         patch("shared.voice_out.subprocess.Popen", return_value=_fake_player()):
+        voice.speak("hello there", on_first_chunk=lambda: seen.append(1))
+    assert seen == [1]

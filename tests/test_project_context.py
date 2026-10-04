@@ -152,3 +152,56 @@ def test_turn_hint_routes_challenges_and_experiments_only():
 def test_experiment_hint_prefers_holding_retrieval_fixed():
     from shared.context_builder import EXPERIMENT_HINT
     assert "downstream of retrieval" in EXPERIMENT_HINT and "retrieved documents" in EXPERIMENT_HINT
+
+
+def test_value_claims_flag_numbers_not_on_any_inspected_line(tmp_path):
+    from shared.context_builder import value_claims
+    (tmp_path / "pb.py").write_text("MAX_EVIDENCE = 1\ntop_k: 5\n")
+    sess = ProjectSession(tmp_path)
+    sess.attach("pb.py")
+    ev = list(sess.attachments.values())
+    assert value_claims("`MAX_EVIDENCE` is 1 and top_k = 5.0", ev) == []
+    assert value_claims("MAX_EVIDENCE was 5 before", ev) == ["MAX_EVIDENCE=5"]
+    assert value_claims("MAX_EVIDENCE changed from 3 to 1", ev) == ["MAX_EVIDENCE=3"]
+    assert value_claims("the retriever_score is 9", ev) == ["retriever_score=9"]  # never inspected
+
+
+def test_value_claims_accept_diff_lines(tmp_path):
+    from shared.context_builder import value_claims
+    from shared.project_context import ContextSource
+    diff = ContextSource("pb.py", 1, 9, "-MAX_EVIDENCE = 3\n+MAX_EVIDENCE = 1\n", "h", 0.0, "git_diff")
+    assert value_claims("MAX_EVIDENCE changed from 3 to 1", [diff]) == []
+
+
+def test_inspection_style_next_is_detected_but_real_experiments_are_not():
+    from shared.context_builder import looks_like_inspection
+    assert looks_like_inspection("Run git_diff to see the exact changes")
+    assert looks_like_inspection("Read src/retriever.py lines 30-40 to check the sort")
+    assert looks_like_inspection("Examine the prompt builder for truncation")
+    assert not looks_like_inspection("Replay identical inputs through old and new prompt assembly")
+    assert not looks_like_inspection("Run the evaluation with MAX_EVIDENCE set to 3 and compare accuracy")
+    assert not looks_like_inspection("Compare grounded accuracy with top_k held at 5")
+
+
+def test_value_claims_ignore_headers_proposals_and_hypotheses(tmp_path):
+    from shared.context_builder import value_claims
+    (tmp_path / "pb.py").write_text("MAX_EVIDENCE = 1\n")
+    sess = ProjectSession(tmp_path)
+    sess.attach("pb.py")
+    ev = list(sess.attachments.values())
+    reply = ("OBSERVATIONS:\n- `MAX_EVIDENCE` is 1\nHYPOTHESES:\n- MAX_EVIDENCE was 9 maybe\n"
+             "NEXT: Modify MAX_EVIDENCE from 1 to 3 and run with top_k set to 1\nSPOKEN: The cap is on.")
+    assert value_claims(reply, ev) == []
+    assert value_claims("OBSERVATIONS:\n- MAX_EVIDENCE was 5\nSPOKEN: ok", ev) == ["MAX_EVIDENCE=5"]
+    assert value_claims("SPOKEN: MAX_EVIDENCE was 5 before.", ev) == ["MAX_EVIDENCE=5"]
+
+
+def test_from_to_is_attributed_to_the_nearest_identifier(tmp_path):
+    from shared.context_builder import value_claims
+    (tmp_path / "pb.py").write_text("MAX_EVIDENCE = 1\n")
+    sess = ProjectSession(tmp_path)
+    sess.attach("pb.py")
+    ev = list(sess.attachments.values())
+    # git_diff is mentioned first, but the numbers belong to MAX_EVIDENCE
+    flagged = value_claims("OBSERVATIONS:\n- git_diff shows MAX_EVIDENCE changed from 3 to 1\nSPOKEN: x", ev)
+    assert flagged == ["MAX_EVIDENCE=3"]

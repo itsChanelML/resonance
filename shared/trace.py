@@ -13,6 +13,7 @@ class TurnTrace:
         self.marks: dict[str, float] = {"start": start if start is not None else time.monotonic()}
         self.context: list[dict] = []
         self.tool_calls: list[dict] = []
+        self.revisions: list[str] = []
         self.status = "OK"
 
     def mark(self, stage: str) -> None:

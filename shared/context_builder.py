@@ -250,3 +250,80 @@ def turn_hint(text: str) -> str:
     if _EXPERIMENT.search(text):
         return EXPERIMENT_HINT
     return ""
+
+
+# ---- answer validation (inputs to one revision pass) -----------------------
+_NUM = r"(-?\d+(?:\.\d+)?)"
+_IDENT_TOKEN = r"([A-Z][A-Z0-9_]{2,}|[a-z]+_[a-z0-9_]+)"
+# Only connectors that state a fact about the code ("X is 5", "X = 5", "X was 5"). "set to" and
+# "to" are left out on purpose: they usually propose a value to try, which is not a claim.
+_VALUE = re.compile(rf"\b{_IDENT_TOKEN}\b\s*(?:=|==|:|is|was|were)\s*{_NUM}\b")
+_FROM_TO = re.compile(rf"\bfrom\s+{_NUM}\s+to\s+{_NUM}")
+_TOOLS = re.compile(r"\b(git_diff|search_code|read_file|list_files)\b")
+_INSPECT = re.compile(
+    r"^\W*(?:the engineer should |you should |next,? )?(?:read|inspect|examine|look (?:at|into)|open|check|"
+    r"search|review|find|list|view|see|verify (?:the )?(?:code|file|implementation)|run|use|call)\b", re.I)
+_EXPERIMENT_VERB = re.compile(
+    r"\b(replay|re-?run|rerun|compare|vary|varying|set|change|restore|revert|swap|toggle|ablat|measure|execute|"
+    r"evaluation|eval|test suite|experiment)\b", re.I)
+
+
+def _numbers_near(evidence: list[ContextSource], ident: str) -> set[float]:
+    """Every number on any inspected line that mentions ident."""
+    found: set[float] = set()
+    for src in evidence:
+        for line in src.content.splitlines():
+            if ident in line:
+                found.update(float(n) for n in re.findall(r"-?\d+(?:\.\d+)?", line))
+    return found
+
+
+def value_claims(text: str, evidence: list[ContextSource]) -> list[str]:
+    """Numbers the answer attaches to an identifier (MAX_EVIDENCE = 5, top_k
+    from 3 to 5) that appear on no inspected line mentioning that identifier."""
+    bad: list[str] = []
+    seen = set()
+    # Check what the answer asserts exists (observations, spoken), not what it
+    # proposes (NEXT) or guesses (HYPOTHESES); and drop section headers so
+    # "NEXT:" is never read as an identifier.
+    claimed = [_section(text, name) or "" for name in ("OBSERVATIONS", "SPOKEN")]
+    text = _HEAD.sub(" ", "\n".join(claimed) if any(claimed) else text)
+    claims = [(i, n) for i, n in _VALUE.findall(text)]
+    for m in _FROM_TO.finditer(text):
+        # attribute "from A to B" to the nearest identifier before it
+        near = re.findall(_IDENT_TOKEN, text[max(0, m.start() - 60):m.start()])
+        if near:
+            claims += [(near[-1], m.group(1)), (near[-1], m.group(2))]
+    for ident, num in claims:
+        if (ident, num) in seen:
+            continue
+        seen.add((ident, num))
+        if float(num) not in _numbers_near(evidence, ident):
+            bad.append(f"{ident}={num}")
+    return bad
+
+
+def looks_like_inspection(next_text: str) -> bool:
+    """True when NEXT only asks for more reading, or names one of our tools:
+    that is work the assistant should do itself, not an experiment for the
+    engineer."""
+    if _TOOLS.search(next_text):
+        return True
+    return bool(_INSPECT.match(next_text.strip()) and not _EXPERIMENT_VERB.search(next_text))
+
+
+def revision_issues(reply: str, evidence: list[ContextSource]) -> list[str]:
+    """Problems worth one correction pass before the answer is shown."""
+    issues = []
+    nxt = _section(reply, "NEXT")
+    if nxt and looks_like_inspection(nxt):
+        issues.append(
+            "NEXT only asks to read or inspect something, or names a tool. You can do that yourself: "
+            "call the tool now, then give an experiment the engineer must run, stating what is held "
+            "fixed and what varies")
+    values = value_claims(reply, evidence)
+    if values:
+        issues.append(
+            "These values do not appear in anything you have inspected: " + ", ".join(values)
+            + ". Read the file or diff to confirm them, or remove the claim")
+    return issues

@@ -147,3 +147,32 @@ Timing marks cover activation, transcription, model reply, speech start and
 interruption. First audible output is approximated by speech start, and an
 in-flight NIM request cannot be cancelled, so a superseded reply is discarded
 when it returns.
+
+## Open items from Milestone 3, addressed
+
+| Item | Change | Measured (live, RAG demo) |
+|---|---|---|
+| Next step is a tool action ("run git_diff") | Detect it (reads/inspects/names a tool, no experiment verbs); one correction pass | 7 of 25 answers before, 2 of 36 after |
+| Invented values (`MAX_EVIDENCE` was 5; the diff says 3) | Check numbers attached to identifiers in OBSERVATIONS and SPOKEN against inspected lines (not NEXT or HYPOTHESES, which propose or guess); one correction pass | 8 of 30 turns before, 2 of 39 after |
+| First audible output approximated | `first_audio` mark when the first audio bytes reach the player | Unit-tested; not measured live (it would play audio and spend ElevenLabs credits) |
+| In-flight request cannot be cancelled | Each model call runs on a worker thread and the turn stops waiting the moment it is superseded; the abandoned request finishes in the background and its result is discarded | Unit-tested: a superseded turn returns in about 0.2 s while the request takes 1 s |
+
+The correction pass runs at most once per turn (5 of 39 turns used it) and
+average turn time did not change measurably (12.7 s before, 13.1 s after).
+Control: `RESONANCE_REVISE=false`.
+
+Two of my own measurement mistakes are worth recording. The first run scored
+the whole terminal output, including `[tool] ... max_matches=10` trace lines,
+and reported false "unseen values"; scoring now covers only the model's reply.
+The check itself also had two false-positive classes found by reading the
+flags: section headers read as identifiers (`NEXT=1`), and proposals like "run
+with top_k set to 1" read as claims. Both are fixed, along with attributing
+"from A to B" to the nearest identifier instead of the first.
+
+**Release gate.** Sessions with both a correct diagnosis and an informative
+fixed-input experiment: 6 of 8 (75%), against the brief's "at least 4 of 5"
+(80%). That is close but not met, and 8 sessions cannot distinguish the two.
+Diagnosis alone was 7 of 8 and the experiment alone 7 of 8 in the same sessions.
+Still open: the model invents baselines when it has not read the diff (the check
+now catches and corrects most), and rehearsal on the presentation machine with
+the real voice path has not been done.

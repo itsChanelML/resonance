@@ -5,6 +5,7 @@ without an answer, the model is asked to answer from what it has and say
 what is missing, instead of inventing evidence."""
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -21,6 +22,32 @@ INCOMPLETE = "INCOMPLETE"
 CANCELLED = "CANCELLED"
 
 
+_CANCEL = object()
+
+
+def _call_cancellable(fn: Callable, is_current: Callable[[], bool], poll: float = 0.1):
+    """Run a blocking model call on a worker thread and stop waiting as soon as
+    the turn is superseded. The HTTP request cannot be aborted mid-flight, so
+    the worker may finish in the background; its result is discarded."""
+    box: dict = {}
+
+    def work():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:  # re-raised on the caller's thread
+            box["error"] = exc
+
+    worker = threading.Thread(target=work, daemon=True)
+    worker.start()
+    while worker.is_alive():
+        worker.join(poll)
+        if not is_current():
+            return _CANCEL
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 @dataclass
 class InspectionResult:
     reply: str | None
@@ -28,6 +55,7 @@ class InspectionResult:
     evidence: list[ContextSource] = field(default_factory=list)
     calls: list[dict] = field(default_factory=list)
     reason: str = ""
+    revisions: list[str] = field(default_factory=list)  # problems the model was asked to fix
 
 
 def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
@@ -36,13 +64,17 @@ def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
                    on_call: Callable[[dict], None] | None = None,
                    max_tokens: int = 900, require_tool: bool = False,
                    final_thinking: bool = False, final_model: str | None = None,
-                   final_max_tokens: int = 2000) -> InspectionResult:
+                   final_max_tokens: int = 2000,
+                   validate: Callable[[str, list], list[str]] | None = None,
+                   max_revisions: int = 1,
+                   on_revise: Callable[[list[str]], None] | None = None) -> InspectionResult:
     messages = list(messages)
     started = time.monotonic()
     evidence: list[ContextSource] = []
     calls: list[dict] = []
     used_chars = 0
     reason = ""
+    revisions: list[str] = []
 
     for round_no in range(max_rounds):
         if not is_current():
@@ -57,8 +89,11 @@ def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
         # First hop of an investigative turn must inspect something: the model
         # otherwise answers about code it has not read.
         choice = "required" if (require_tool and round_no == 0) else "auto"
-        msg = nim.chat_with_tools(messages, tools.schemas, max_tokens=max_tokens,
-                                  thinking=False, tool_choice=choice)
+        msg = _call_cancellable(
+            lambda: nim.chat_with_tools(messages, tools.schemas, max_tokens=max_tokens,
+                                        thinking=False, tool_choice=choice), is_current)
+        if msg is _CANCEL:
+            return InspectionResult(None, CANCELLED, evidence, calls, revisions=revisions)
         tool_calls = msg.get("tool_calls") or []
         if not tool_calls:
             if not is_current():
@@ -68,13 +103,28 @@ def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
                 # Tool use stays on the fast path; the answer itself is rewritten
                 # with thinking on and/or a larger model. Keep the draft if that fails.
                 kwargs = {"model": final_model} if final_model else {}
-                better = nim.chat_with_tools(messages, None, max_tokens=final_max_tokens,
-                                             thinking=final_thinking, **kwargs)
-                content = better.get("content") or content
+                better = _call_cancellable(
+                    lambda: nim.chat_with_tools(messages, None, max_tokens=final_max_tokens,
+                                                thinking=final_thinking, **kwargs), is_current)
+                if better is not _CANCEL:
+                    content = better.get("content") or content
                 if not is_current():
                     return InspectionResult(None, CANCELLED, evidence, calls)
+            if content and validate and len(revisions) < max_revisions:
+                issues = validate(content, evidence)
+                if issues:
+                    # One correction pass: show the model its own problems, let it
+                    # use tools again, and accept whatever it answers next.
+                    revisions.extend(issues)
+                    if on_revise:
+                        on_revise(issues)
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "user", "content":
+                                     "Before this is shown: " + "; ".join(issues)
+                                     + ". Fix this, then answer again in the same format."})
+                    continue
             if content:
-                return InspectionResult(content, COMPLETE, evidence, calls)
+                return InspectionResult(content, COMPLETE, evidence, calls, revisions=revisions)
             reason = "model returned an empty answer"
             break
 
@@ -104,5 +154,8 @@ def run_inspection(nim, messages: list[dict], tools: ProjectTools, *,
     messages.append({"role": "user", "content": (
         f"Inspection stopped: {reason}. Answer now using only the evidence "
         "already gathered, and list in MISSING what you could not check.")})
-    msg = nim.chat_with_tools(messages, None, max_tokens=max_tokens, thinking=False)
-    return InspectionResult(msg.get("content") or None, INCOMPLETE, evidence, calls, reason)
+    msg = _call_cancellable(
+        lambda: nim.chat_with_tools(messages, None, max_tokens=max_tokens, thinking=False), is_current)
+    if msg is _CANCEL:
+        return InspectionResult(None, CANCELLED, evidence, calls, revisions=revisions)
+    return InspectionResult(msg.get("content") or None, INCOMPLETE, evidence, calls, reason, revisions)

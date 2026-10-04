@@ -401,6 +401,13 @@ final answer with thinking on, and `RESONANCE_FINAL_MODEL=<nim model id>`
 rewrites it with a different model. Neither beat the hints alone in testing
 and both add latency (see `docs/BASELINE.md`).
 
+Before an answer is shown it gets one automatic check: if the proposed next
+step is only "read more code" (work Resonance can do itself) or the answer
+states a number for a setting (`MAX_EVIDENCE was 5`) that appears in nothing
+it inspected, the model is asked once to fix it. Set `RESONANCE_REVISE=false`
+to turn that off. `/trace` shows when the model's first audio bytes reached
+the player (`first_audio`), the closest measurable point to "first sound".
+
 Project mode turns the model's thinking off to keep replies around 4-5
 seconds. With it on, the same prompt took 27-86 seconds in testing (see
 `docs/BASELINE.md`).

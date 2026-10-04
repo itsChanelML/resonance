@@ -184,3 +184,37 @@ def test_final_hop_is_rewritten_only_when_enabled(tools):
     assert run_inspection(nim, [], tools, final_thinking=True).reply == "draft"  # keeps draft on empty rewrite
     nim = FakeNim({"content": "draft"})
     assert run_inspection(nim, [], tools).reply == "draft" and len(nim.calls) == 1
+
+
+def test_revision_gets_one_pass_and_tools_stay_available(tools):
+    nim = FakeNim({"content": "draft one"}, _call("list_files", {}), {"content": "draft two"})
+    seen = []
+    r = run_inspection(nim, [], tools, validate=lambda reply, ev: ["fix it"] if reply == "draft one" else [],
+                       on_revise=seen.append)
+    assert r.reply == "draft two" and r.revisions == ["fix it"] and seen == [["fix it"]]
+    assert nim.calls[1][1] is not None  # tools still offered during the revision
+
+
+def test_revision_is_limited_to_one_pass(tools):
+    nim = FakeNim({"content": "a"}, {"content": "b"})
+    r = run_inspection(nim, [], tools, validate=lambda reply, ev: ["still wrong"])
+    assert r.reply == "b" and len(nim.calls) == 2  # second answer is accepted as is
+
+
+def test_cancelled_wait_returns_without_waiting_for_the_request(tools):
+    import time
+
+    class Slow:
+        def chat_with_tools(self, *a, **k):
+            time.sleep(1.0)
+            return {"content": "late"}
+
+    state = {"n": 0}
+
+    def is_current():
+        state["n"] += 1
+        return state["n"] < 3  # superseded shortly after the request starts
+
+    started = time.monotonic()
+    r = run_inspection(Slow(), [], tools, is_current=is_current)
+    assert r.status == CANCELLED and time.monotonic() - started < 0.6

@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -52,7 +52,7 @@ class TestHandle:
         app.handle("hello", source="typed")
         assert app.history[-2] == {"role": "user", "content": "hello"}
         assert app.history[-1] == {"role": "assistant", "content": "a spoken reply"}
-        app.voice.speak.assert_called_once_with("a spoken reply")
+        app.voice.speak.assert_called_once_with("a spoken reply", on_first_chunk=ANY)
 
     def test_skips_speak_when_voice_output_off(self, app, monkeypatch):
         monkeypatch.setattr(resonance, "VOICE_OUTPUT", False)
@@ -211,7 +211,7 @@ class TestTurnsAndErrors:
         app.nim.chat_with_tools.return_value = {"content": "SPOKEN: Short.\nOBSERVATIONS:\n- a.py:1-1 x"}
         app.handle("why", source="typed")
         assert app.nim.chat_with_tools.call_args.kwargs["thinking"] is False
-        app.voice.speak.assert_called_once_with("Short.")
+        app.voice.speak.assert_called_once_with("Short.", on_first_chunk=ANY)
 
     def test_slash_commands_are_not_sent_to_model(self, app):
         app.handle("/context", source="typed")
@@ -357,7 +357,7 @@ class TestMilestone3:
         n = app.nim.chat_with_tools.call_count
         app.voice.speak.reset_mock()
         app.handle("Wait, can you say that again?", source="typed")
-        app.voice.speak.assert_called_once_with("Evidence is capped.")
+        app.voice.speak.assert_called_once_with("Evidence is capped.", on_first_chunk=ANY)
         app.handle("Tell me more about that.", source="typed")
         assert app.voice.speak.call_args.args[0].startswith("More detail:")
         assert app.nim.chat_with_tools.call_count == n
@@ -421,3 +421,50 @@ class TestMilestone3:
             on_release(resonance.HOTKEY)
         marks = app.last_turn.elapsed()
         assert "transcribed" in marks and marks["transcribed"] > 0 and "model_reply" in marks
+
+
+class TestOpenItems:
+    def _project(self, app, tmp_path):
+        (tmp_path / "a.py").write_text("MAX = 3\n")
+        app.set_project(str(tmp_path))
+
+    def test_first_audio_mark_recorded_when_voice_reports_first_chunk(self, app, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
+        app.voice.speak.side_effect = lambda text, on_first_chunk=None: on_first_chunk()
+        app.handle("hello there", source="typed")
+        assert "first_audio" in app.last_turn.elapsed()
+
+    def test_invented_value_triggers_one_revision_and_corrected_answer_is_shown(self, app, tmp_path, capsys):
+        self._project(app, tmp_path)
+        read = {"content": None, "tool_calls": [{"id": "1", "type": "function", "function": {
+            "name": "read_file", "arguments": '{"path": "a.py"}'}}]}
+        bad = {"content": "OBSERVATIONS:\n- `MAX` was 5 at a.py:1-1\nNEXT: Replay with MAX raised\nSPOKEN: MAX was 5."}
+        good = {"content": "OBSERVATIONS:\n- `MAX` is 3 at a.py:1-1\nNEXT: Replay with MAX raised\nSPOKEN: MAX is 3."}
+        app.nim.chat_with_tools.side_effect = [read, bad, good]
+        app.handle("What is the evidence limit in this project?", source="typed")
+        out = capsys.readouterr().out
+        assert "MAX is 3" in out and "MAX was 5" not in out and "checking an issue" in out
+        assert app.last_turn.revisions and "MAX=5" in app.last_turn.revisions[0]
+
+    def test_revision_can_be_switched_off(self, app, tmp_path, monkeypatch):
+        self._project(app, tmp_path)
+        monkeypatch.setattr(resonance, "REVISE", False)
+        app.nim.chat_with_tools.side_effect = [
+            {"content": "OBSERVATIONS:\n- `MAX` was 5 at a.py:1-1\nNEXT: Replay.\nSPOKEN: x."}]
+        app.handle("What is the evidence limit in this project?", source="typed")
+        assert app.nim.chat_with_tools.call_count == 1
+
+    def test_cancelled_turn_records_cancellation(self, app, tmp_path):
+        import time
+        self._project(app, tmp_path)
+
+        def slow(*a, **k):
+            app.turns.cancel()  # barge-in while the request is in flight
+            time.sleep(0.5)
+            return {"content": "SPOKEN: obsolete"}
+
+        app.nim.chat_with_tools.side_effect = slow
+        started = time.monotonic()
+        app.handle("Why did accuracy drop after this change?", source="typed")
+        assert time.monotonic() - started < 0.45  # stopped waiting instead of blocking for the request
+        assert app.last_turn.status == "STALE" and "cancelled" in app.last_turn.elapsed()
