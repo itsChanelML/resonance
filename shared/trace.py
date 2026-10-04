@@ -5,16 +5,21 @@ import time
 
 
 class TurnTrace:
-    def __init__(self, turn_id: int, source: str):
+    def __init__(self, turn_id: int, source: str, start: float | None = None):
         self.turn_id = turn_id
         self.source = source
-        self.marks: dict[str, float] = {"start": time.monotonic()}
+        # start is the hotkey activation time for voice turns, so the offsets
+        # below include recording and transcription, not just the model call.
+        self.marks: dict[str, float] = {"start": start if start is not None else time.monotonic()}
         self.context: list[dict] = []
         self.tool_calls: list[dict] = []
         self.status = "OK"
 
     def mark(self, stage: str) -> None:
         self.marks.setdefault(stage, time.monotonic())
+
+    def mark_at(self, stage: str, when: float) -> None:
+        self.marks.setdefault(stage, when)
 
     def elapsed(self) -> dict[str, float]:
         t0 = self.marks["start"]

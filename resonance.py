@@ -43,6 +43,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 
 from pynput import keyboard
 from dotenv import load_dotenv
@@ -55,6 +56,9 @@ from shared.context_builder import (
     inspection_prompt, project_prompt, split_reply, turn_hint,
 )
 from shared.llm_client import NimClient, NimConfig
+from shared.investigation_state import (
+    EXPAND_INTENT, RECAP_INTENT, REPLAY_INTENT, InvestigationState, short,
+)
 from shared.inspector import INCOMPLETE, run_inspection
 from shared.project_context import ProjectSession
 from shared.project_tools import ProjectTools
@@ -132,6 +136,12 @@ class Resonance:
         self.tools: ProjectTools | None = None
         self.last_trace: list[dict] = []
         self.ledger: list = []  # everything inspected this session, for citation checks
+        self.state = InvestigationState()  # session memory for the current investigation
+        self.last_spoken = ""
+        self.last_reply = ""
+        self.muted = False
+        self._pressed_at: float | None = None
+        self._mic_failed = False
         self.capture = VoiceCapture()
         self.usage = UsageTracker()
         self.nim = NimClient(NimConfig(api_key=os.environ["NVIDIA_API_KEY"]), usage=self.usage)
@@ -154,6 +164,7 @@ class Resonance:
         self.project = ProjectSession(root)
         self.tools = ProjectTools(self.project)
         self.ledger.clear()
+        self.state.clear()  # another project's investigation must not carry over
         with self._history_lock:
             self.history.clear()  # don't carry another project's context over
         print(f"  Project: {self.project.root}")
@@ -175,18 +186,21 @@ class Resonance:
         suffix = f" ({', '.join(notes)})" if notes else ""
         print(f"  Attached {src.ref}, {len(src.content)} chars{suffix}")
 
-    def _prune_ledger(self) -> None:
+    def _prune_ledger(self) -> set[str]:
         """Forget inspected evidence whose file changed since it was read, so
         old observations cannot be cited as if still true."""
         root = self.project.root
-        fresh = []
+        fresh, changed = [], set()
         for src in self.ledger:
             try:
                 if (root / src.path).stat().st_mtime <= src.captured_at:
                     fresh.append(src)
+                else:
+                    changed.add(src.path)
             except OSError:
-                pass
+                changed.add(src.path)
         self.ledger[:] = fresh
+        return changed
 
     @staticmethod
     def _print_call(call: dict) -> None:
@@ -223,6 +237,25 @@ class Resonance:
                 print(f"  {t.summary()}")
                 for c in getattr(t, "tool_calls", []):
                     print(f"  [tool] {c['tool']} {c['args']} -> {c['status']} ({c['chars']} chars)")
+        elif cmd in ("/state", "/notes"):
+            print(self.state.notes() if not self.state.is_empty() else "  No investigation notes yet.")
+        elif cmd == "/recap":
+            self._say_local(*self.state.recap())
+        elif cmd == "/verify":
+            num, _, result = arg.partition(" ")
+            ok = num.lstrip("eE").isdigit() and self.state.verify(int(num.lstrip("eE")), result)
+            print("  Experiment marked verified." if ok else "  Usage: /verify <experiment id> <what you observed>")
+        elif cmd == "/ruleout":
+            num, _, reason = arg.partition(" ")
+            ok = num.lstrip("hH").isdigit() and self.state.rule_out(int(num.lstrip("hH")), reason.strip() or "engineer ruled it out")
+            print("  Hypothesis ruled out." if ok else "  Usage: /ruleout <hypothesis id> [reason]")
+        elif cmd == "/mute":
+            self.muted = True
+            self.voice.stop()
+            print("  Muted. Replies print only; /unmute to hear them again.")
+        elif cmd == "/unmute":
+            self.muted = False
+            print("  Unmuted.")
         elif cmd == "/preview":
             if not self.project or not self.project.attachments:
                 print("  No context attached.")
@@ -234,12 +267,56 @@ class Resonance:
             if self.project:
                 self.project.clear()
             self.ledger.clear()
-            print("  Context cleared.")
+            self.state.clear()
+            print("  Context and investigation notes cleared.")
         else:
-            print("  Commands: /project <dir>, /attach <file>, /context, /preview, /trace, /clear")
+            print("  Commands: /project <dir>, /attach <file>, /context, /preview, /trace, /state, /recap,\n  /verify <id> <result>, /ruleout <id>, /mute, /unmute, /clear")
         return True
 
-    def handle(self, text: str, source: str) -> None:
+    def _speak(self, spoken: str, trace: TurnTrace) -> None:
+        if not VOICE_OUTPUT or self.muted:
+            return
+        print("  Speaking...")
+        self._speaking.set()
+        trace.mark("speech_start")
+        try:
+            self.voice.speak(spoken)
+        except Exception as exc:
+            trace.status = "SPEECH_ERROR"
+            print(f"  [ERROR] speech failed ({exc}); reply is shown above as text.")
+        finally:
+            self._speaking.clear()
+
+    def _say_local(self, spoken: str, notes: str | None = None, trace: TurnTrace | None = None) -> None:
+        """Answer without calling the model: print the full notes, speak the short line."""
+        if notes:
+            print(notes)
+        print(f"  Spoken: {spoken}")
+        self.last_spoken = spoken
+        self._speak(spoken, trace or TurnTrace(0, "local"))
+
+    def _expansion(self) -> str:
+        """Spoken detail for 'tell me more', built from the last answer's
+        observations, with citations stripped."""
+        from shared.investigation_state import _bullets
+        from shared.context_builder import _section
+        items = [short(b, 14) for b in _bullets(_section(self.last_reply, "OBSERVATIONS") or "")[:3]]
+        return ("More detail: " + "; ".join(items) + ".") if items else "There is no more detail on that."
+
+    def _local_intent(self, text: str):
+        """Recap, replay, and expand are answered locally: instant, free, and
+        a recap can never describe a proposal as a verified result."""
+        if RECAP_INTENT.search(text):
+            spoken, notes = self.state.recap()
+            return spoken, notes
+        if REPLAY_INTENT.search(text) and self.last_spoken:
+            return self.last_spoken, None
+        if EXPAND_INTENT.search(text) and self.last_reply:
+            return self._expansion(), None
+        return None
+
+    def handle(self, text: str, source: str, activated_at: float | None = None,
+               transcribed_at: float | None = None) -> None:
         if not text.strip():
             return
         if source == "typed" and self._command(text.strip()):
@@ -248,7 +325,17 @@ class Resonance:
         logger.info("[%s input] %s", source, text)
         self._interrupt_speech()  # a new turn always silences the previous answer
         turn_id = self.turns.begin()
-        trace = self.last_turn = TurnTrace(self.turns.number(turn_id), source)
+        number = self.turns.number(turn_id)
+        trace = self.last_turn = TurnTrace(number, source, start=activated_at)
+        if transcribed_at is not None:
+            trace.mark_at("transcribed", transcribed_at)
+
+        local = self._local_intent(text)
+        if local:
+            trace.status = "LOCAL"
+            self._say_local(local[0], local[1], trace)
+            logger.info(trace.summary())
+            return
         print("  Thinking...")
 
         with self._history_lock:
@@ -257,13 +344,20 @@ class Resonance:
         sources = []
         inspecting = self.tools is not None
         if inspecting:
-            for rel in self.project.refresh_stale():
+            changed = set(self.project.refresh_stale())
+            for rel in changed:
                 print(f"  (re-read {rel}: file changed)")
-            self._prune_ledger()
+            changed |= self._prune_ledger()
+            if changed and self.state.mark_stale(changed):
+                print("  (some earlier observations are now stale; notes updated)")
+            self.state.apply_user_turn(text, number)  # the engineer's constraints take effect this turn
             sources = list(self.project.attachments.values())
             block, self.last_trace = build_context_block(sources)
             trace.context = self.last_trace
             system = SYSTEM_PROMPT_PROJECT + inspection_prompt(sources)
+            memory = self.state.to_prompt()
+            if memory:
+                system += "\n\n" + memory
             if block:
                 system += "\n\nAttached files:\n\n" + block
         messages = [{"role": "system", "content": system}] + history
@@ -308,6 +402,9 @@ class Resonance:
         spoken, detail = split_reply(reply) if inspecting else (reply, reply)
         if inspecting:
             spoken = hedge_spoken(spoken, reply)
+            self.state.apply_reply(reply, evidence, number)
+            self.state.apply_challenge(text, f"{spoken} {detail}", number)
+        self.last_spoken, self.last_reply = spoken, reply
         with self._history_lock:
             self.history.append({"role": "user", "content": text})
             self.history.append({"role": "assistant",
@@ -319,21 +416,13 @@ class Resonance:
             bad = check_citations(detail, evidence)
             if bad:
                 print(f"  ! Unsupported citations (not in anything inspected this session): {', '.join(bad)}")
+            if self.state.reasserted:
+                print(f"  ! Re-raised a ruled-out idea: {self.state.reasserted[-1]}")
         else:
             print(f"> {reply}")
         _notify("Resonance", spoken)
 
-        if VOICE_OUTPUT:
-            print("  Speaking...")
-            self._speaking.set()
-            trace.mark("speech_start")
-            try:
-                self.voice.speak(spoken)
-            except Exception as exc:
-                trace.status = "SPEECH_ERROR"
-                print(f"  [ERROR] speech failed ({exc}); reply is shown above as text.")
-            finally:
-                self._speaking.clear()
+        self._speak(spoken, trace)
         logger.info(trace.summary())
 
     def _interrupt_speech(self) -> None:
@@ -349,16 +438,33 @@ class Resonance:
             if key == HOTKEY:
                 self.turns.cancel()  # barge-in: any in-flight reply is now stale
                 self._interrupt_speech()  # cut off the current reply
-                self.capture.start()
+                self._pressed_at = time.monotonic()
+                try:
+                    self.capture.start()
+                    self._mic_failed = False
+                except Exception as exc:
+                    self._mic_failed = True
+                    print(f"  [ERROR] microphone unavailable ({exc}). Type your question instead.")
 
         def on_release(key):
             if key == HOTKEY:
-                text = self.capture.stop_and_transcribe()
+                if self._mic_failed:
+                    return
+                try:
+                    text = self.capture.stop_and_transcribe()
+                except Exception as exc:
+                    print(f"  [ERROR] transcription failed ({exc}). Type your question instead.")
+                    return
+                transcribed_at = time.monotonic()
                 if text:
                     # Runs off the listener thread so holding the hotkey
                     # again (barge-in) is caught immediately instead of
                     # waiting for this reply to finish speaking.
-                    threading.Thread(target=self.handle, args=(text, "voice"), daemon=True).start()
+                    threading.Thread(
+                        target=self.handle, args=(text, "voice"),
+                        kwargs={"activated_at": self._pressed_at, "transcribed_at": transcribed_at},
+                        daemon=True,
+                    ).start()
 
         listener = keyboard.Listener(on_press=on_press, on_release=on_release)
         listener.start()  # background thread, non-blocking

@@ -102,3 +102,48 @@ same sessions.
 it also steers the assistant toward the demo scenario's answer. Present the
 experiment as the assistant following debugging guidance, not as it deducing
 the cause unaided.
+
+## Milestone 3: investigation state, recap, continuity
+
+**Finding that shaped the design.** I first tried asking the model to maintain
+the notes (JSON mode works on this model). It was unreliable: given "You
+suggested changing the model, what evidence?" it marked both unrelated
+hypotheses ruled out, with reasons like "User did not reject the hypothesis",
+copied the instructions into `constraints`, and mangled the JSON on a plain
+question. So state updates are deterministic: observations need validated
+citations, a hypothesis changes status only on an explicit engineer action
+(`/ruleout`, "rule out X", "assume X is fine", or a challenged claim the
+answer found no evidence for), constraints and corrections are the engineer's
+own sentences, and an experiment is "proposed" until `/verify` supplies a
+result. Recap, replay and "tell me more" are built locally with no model call.
+
+**Bugs found in live testing and fixed:** matching a one-word phrase such as
+"retrieval" ruled out any hypothesis that mentioned it (now only 3+ meaningful
+words match an existing hypothesis, with stopwords removed); the recap ran over
+70 words and ended in fragments (now a 55-word budget that drops the least
+important parts and cuts at clause boundaries); constraints stored the whole
+message, questions included (now only the matching sentence).
+
+**Acceptance run** (6 sessions, live NIM, RAG demo: diagnose, one experiment
+with a constraint, challenge a claim never made, "assume retrieval is fine",
+then "I'm back, give me a recap"). Checks are mine and keyword-based, on one
+scenario, so they show the mechanism works, not that it generalizes.
+
+| Check | Result |
+|---|---|
+| Both constraints present in notes | 6/6 |
+| Challenged claim recorded as unsupported | 6/6 (5/6 in an earlier run: the model ignored the challenge once, and nothing is recorded when it does) |
+| Recap lists the challenged claim as ruled out | 6/6 |
+| Recap says the next step is "not yet run" | 6/6 |
+| Recap says nothing has been verified | 6/6 |
+| Recap at most 70 words | 6/6 |
+| Recap in under 1.5 s (local, no model call) | 6/6 |
+| No ruled-out idea re-raised by the model | 6/6 |
+
+Known limits: the model sometimes proposes a tool action ("run git_diff") as
+its next step, and still invents baseline values (it said `MAX_EVIDENCE` was 5
+when the diff shows 3); the notes record what it said, they do not fix it.
+Timing marks cover activation, transcription, model reply, speech start and
+interruption. First audible output is approximated by speech start, and an
+in-flight NIM request cannot be cancelled, so a superseded reply is discarded
+when it returns.

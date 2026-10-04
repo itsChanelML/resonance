@@ -302,3 +302,122 @@ class TestTurnHintsAndFinalHop:
         app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
         app.handle("What evidence connects this regression to the model?", source="typed")
         assert "[Guidance:" not in app.nim.chat_with_tools.call_args.args[0][-1]["content"]
+
+
+class TestMilestone3:
+    def _project(self, app, tmp_path):
+        (tmp_path / "a.py").write_text("MAX = 1\nx = 2\n")
+        app.set_project(str(tmp_path))
+
+    REPLY = ("OBSERVATIONS:\n- `MAX` is 1 at a.py:1-1\nHYPOTHESES:\n- Capping evidence lowers accuracy\n"
+             "NEXT: Replay identical inputs with MAX raised\nMISSING: none\nSPOKEN: Evidence is capped.")
+
+    def _read_then(self, reply):
+        call = {"content": None, "tool_calls": [{"id": "1", "type": "function", "function": {
+            "name": "read_file", "arguments": '{"path": "a.py"}'}}]}
+        return [call, {"content": reply}]
+
+    def test_state_is_built_from_a_turn_and_recap_is_local(self, app, tmp_path, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
+        self._project(app, tmp_path)
+        app.nim.chat_with_tools.side_effect = self._read_then(self.REPLY)
+        app.handle("Accuracy dropped after the change, what should I look at first?", source="typed")
+        assert app.state.experiments[0].status == "proposed" and app.state.observations
+        calls_before = app.nim.chat_with_tools.call_count
+        app.voice.speak.reset_mock()
+        app.handle("I'm back. Give me a 20 second recap.", source="typed")
+        assert app.nim.chat_with_tools.call_count == calls_before  # no model call
+        spoken = app.voice.speak.call_args.args[0]
+        assert "not yet run" in spoken and "Nothing has been verified" in spoken
+        assert app.last_turn.status == "LOCAL"
+
+    def test_constraint_is_in_the_prompt_the_same_turn_and_persists(self, app, tmp_path):
+        self._project(app, tmp_path)
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
+        app.handle("We only have time for one experiment, which one?", source="typed")
+        first = app.nim.chat_with_tools.call_args.args[0][0]["content"]
+        assert "only have time for one experiment" in first
+        app.handle("What about the second file please?", source="typed")
+        assert "only have time for one experiment" in app.nim.chat_with_tools.call_args.args[0][0]["content"]
+
+    def test_challenge_rules_out_claim_and_prompt_forbids_repeating_it(self, app, tmp_path):
+        self._project(app, tmp_path)
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: I did not claim that; I found no evidence."}
+        app.handle("You suggested changing the model. What evidence connects this?", source="typed")
+        assert app.state.hypotheses[0].status == "unsupported"
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
+        app.handle("Okay so what is the next step then?", source="typed")
+        assert "do NOT present these as the cause" in app.nim.chat_with_tools.call_args.args[0][0]["content"]
+
+    def test_replay_and_expand_are_local(self, app, tmp_path, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
+        self._project(app, tmp_path)
+        app.nim.chat_with_tools.side_effect = self._read_then(self.REPLY)
+        app.handle("Why did accuracy drop after this change?", source="typed")
+        n = app.nim.chat_with_tools.call_count
+        app.voice.speak.reset_mock()
+        app.handle("Wait, can you say that again?", source="typed")
+        app.voice.speak.assert_called_once_with("Evidence is capped.")
+        app.handle("Tell me more about that.", source="typed")
+        assert app.voice.speak.call_args.args[0].startswith("More detail:")
+        assert app.nim.chat_with_tools.call_count == n
+
+    def test_changed_file_marks_observations_stale(self, app, tmp_path):
+        import os, time
+        self._project(app, tmp_path)
+        app.nim.chat_with_tools.side_effect = self._read_then(self.REPLY)
+        app.handle("Why did accuracy drop after this change?", source="typed")
+        future = time.time() + 5
+        os.utime(tmp_path / "a.py", (future, future))
+        app.nim.chat_with_tools.side_effect = None
+        app.nim.chat_with_tools.return_value = {"content": "SPOKEN: ok"}
+        app.handle("And what about the other part now?", source="typed")
+        assert app.state.observations[0].stale
+
+    def test_switching_project_clears_investigation(self, app, tmp_path):
+        self._project(app, tmp_path)
+        app.state.apply_user_turn("We only have time for one experiment.", 1)
+        app.set_project(str(tmp_path))
+        assert app.state.is_empty() and not app.state.constraints
+
+    def test_verify_and_ruleout_commands(self, app, tmp_path, capsys):
+        self._project(app, tmp_path)
+        app.state.apply_reply(self.REPLY, [], 1)
+        app.handle("/verify 1 not a number of an experiment", source="typed")
+        assert "Usage" in capsys.readouterr().out
+        exp = app.state.experiments[0]
+        app.handle(f"/verify {exp.id} accuracy recovered", source="typed")
+        assert exp.status == "verified"
+        hyp = app.state.hypotheses[0]
+        app.handle(f"/ruleout {hyp.id} checked", source="typed")
+        assert hyp.status == "ruled_out"
+
+    def test_mute_suppresses_speech_until_unmute(self, app, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", True)
+        app.handle("/mute", source="typed")
+        app.handle("hello there", source="typed")
+        app.voice.speak.assert_not_called()
+        app.handle("/unmute", source="typed")
+        app.handle("hello again", source="typed")
+        app.voice.speak.assert_called_once()
+
+    def test_microphone_failure_leaves_typed_input_usable(self, app, capsys):
+        on_press, on_release = _wire_hotkey_listener(app)
+        app.capture.start.side_effect = RuntimeError("no input device")
+        on_press(resonance.HOTKEY)
+        assert "microphone unavailable" in capsys.readouterr().out
+        with patch("resonance.threading.Thread") as mock_thread:
+            on_release(resonance.HOTKEY)
+        mock_thread.assert_not_called()
+        app.handle("typed fallback works", source="typed")
+        app.nim.chat.assert_called()
+
+    def test_voice_turn_records_activation_and_transcription_marks(self, app, monkeypatch):
+        monkeypatch.setattr(resonance, "VOICE_OUTPUT", False)
+        _, on_release = _wire_hotkey_listener(app)
+        app._pressed_at = 100.0
+        app.capture.stop_and_transcribe.return_value = "what does this error mean"
+        with patch("resonance.threading.Thread", _SyncThread):
+            on_release(resonance.HOTKEY)
+        marks = app.last_turn.elapsed()
+        assert "transcribed" in marks and marks["transcribed"] > 0 and "model_reply" in marks

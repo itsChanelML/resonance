@@ -136,6 +136,7 @@ resonance/
 │   ├── project_context.py   # read-only project root, exclusions, attachments
 │   ├── project_tools.py     # list_files, search_code, read_file, git_diff (validated, bounded)
 │   ├── inspector.py         # bounded tool-calling loop (6 rounds, 30s, output budget)
+│   ├── investigation_state.py # session memory: constraints, hypotheses, experiments, recap
 │   ├── context_builder.py   # budgeted context, spoken/detail split, citation check
 │   ├── turn_controller.py   # turn IDs, stale-reply suppression
 │   ├── trace.py             # per-turn timing records
@@ -152,6 +153,7 @@ resonance/
     ├── test_resonance.py     # handle(), hotkey/barge-in wiring, notify, run loop
     ├── test_project_context.py  # boundaries, exclusions, redaction, citations
     ├── test_project_tools.py    # tool validation, git, inspection loop
+    ├── test_investigation_state.py  # state, rule-outs, recap
     ├── test_llm_client.py
     ├── test_voice_out.py
     ├── test_audio_io.py
@@ -202,6 +204,13 @@ through the whole codebase.
 - **`shared/inspector.py`**: `run_inspection`. The bounded tool-calling
   loop: rounds, deadline, output budget, cancellation. Knows nothing about
   voice or the terminal.
+
+- **`shared/investigation_state.py`**: `InvestigationState`. Session memory for one
+  investigation: the problem, the engineer's constraints and corrections,
+  observations (only with validated citations), hypotheses, and experiments.
+  Deterministic on purpose: only explicit engineer actions change a
+  hypothesis, and an experiment stays "proposed" until you supply a result.
+  Never saved to disk.
 
 - **`shared/context_builder.py`**: prompts, the context budget, the
   spoken/detail split, citation checks, and the turn hints.
@@ -335,7 +344,9 @@ changed is forgotten.
 
 Commands at the `>` prompt: `/project <dir>`, `/attach <file>`,
 `/context` (what's attached), `/preview` (the exact attached text that
-will be sent), `/trace` (last turn's timing and tool calls), `/clear`. Run
+will be sent), `/trace` (last turn's timing and tool calls), `/state`
+(investigation notes), `/recap`, `/verify <id> <what you observed>`,
+`/ruleout <id>`, `/mute`, `/unmute`, `/clear`. Run
 `python resonance.py --preflight` to check keys, microphone, project root,
 and the NIM connection before a session.
 
@@ -348,6 +359,21 @@ a change), run `python scripts/build_demo_repo.py /tmp/rag_demo`, then
 The demo project has a deliberately failing test
 (`demo_projects/rag_regression/tests/test_prompt_builder.py`); it proves the
 seeded bug and is excluded from the main `pytest` run.
+
+**Investigation memory.** Within a session Resonance keeps notes: the
+problem, your constraints ("we only have time for one experiment", "assume
+retrieval is fine"), what it has observed in the files (only claims with
+valid citations), hypotheses, and proposed experiments. These go back to the
+model on every turn, so a correction sticks beyond the last few messages.
+A claim you challenge ("you suggested X, what evidence?") that it cannot back
+up is recorded as unsupported and is not offered again as the cause. An
+experiment stays **proposed, not run** until you record a result with
+`/verify`. Say "I'm back, give me a recap" for a short spoken summary
+(what is ruled out, what is still uncertain, the next step) with the full
+notes in the terminal. "Say that again" and "tell me more" also work. These
+three are answered locally, so they are instant and use no NIM request.
+Notes are session memory only: nothing is saved, and switching project or
+`/clear` wipes them. Notes about a file are marked stale if it changes.
 
 Rules it enforces (for attachments and every tool):
 - **Read-only.** Resonance never writes to your project. Git runs with
@@ -382,9 +408,9 @@ seconds. With it on, the same prompt took 27-86 seconds in testing (see
 **Status:** attaching files, searching, reading, and git diffs work
 today. The model is small and sometimes cites a wider line range than it
 read or gets a detail wrong; the citation check flags those, so treat
-answers as leads to verify. Measured rehearsal results, including that the
-brief's release gate is not yet met, are in `docs/BASELINE.md`. An investigation recap that survives
-corrections, and running tests, are planned, not built.
+answers as leads to verify. Measured results, including that the
+brief's release gate is not yet met, are in `docs/BASELINE.md`. Running tests or evaluations on your behalf is
+planned, not built: an experiment Resonance proposes is something you run.
 
 ### 🧪 Running the tests
 
@@ -407,7 +433,8 @@ exclusions, redaction, citation checks, and stale-reply handling.
   project, one input event equals one NIM call. In project mode each tool
   round is another call, so a turn costs roughly 2 to 7. Expect the
   request counter to climb faster, and occasional `503` errors when the
-  shared free tier is busy (the client retries 5 times).
+  shared free tier is busy (the client retries 5 times). A recap, replay, or "tell me more" costs
+  no NIM request.
 - **ElevenLabs Flash**: 10,000 credits/month (~10-20 min of audio).
   Replies are capped at a few spoken sentences by design.
 - **Whisper transcription**: fully local. No API call, no rate limit,
@@ -446,7 +473,10 @@ Update this as milestones land. A stale roadmap is worse than none.
 - [x] Project search, file listing, line-range reads, and git diffs the
       model can request, with a bounded inspection loop
 - [x] Citation check against everything inspected this session
-- [ ] Investigation memory and a short recap within a session
+- [x] Session investigation memory, corrections that stick, and a local
+      recap that never reports a proposal as verified
+- [x] Mute, microphone-failure fallback, and per-turn timing from the
+      hotkey press
 - [ ] Feed real terminal output into the prompt directly, not just
       what's said or typed
 - [ ] Stream the NIM reply itself and start speaking the first sentence
